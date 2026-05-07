@@ -10,12 +10,14 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from adapters.llm_scanner import create_llm_client, test_question
+from adapters.llm_scanner import create_llm_client, test_question, test_question_openai_direct
 
 logger = logging.getLogger(__name__)
 
-# Max concurrent LLM calls. Tier 4 OpenAI = 10,000 RPM → 10 concurrent is very safe.
-PARALLEL_BATCH_SIZE = 10
+# Max concurrent LLM calls — Tier 4 OpenAI = 10K RPM, plenty of headroom at 20.
+# Single executor over ALL tasks (no batching) eliminates head-of-line blocking
+# where one slow OpenAI call held up an entire batch.
+MAX_WORKERS = 20
 
 
 def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
@@ -171,18 +173,35 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
             tasks.append((question, persona, provider, llm_client))
 
     total_tests = len(tasks)
-    logger.info(f"Running {total_tests} tests in batches of {PARALLEL_BATCH_SIZE}")
+    logger.info(f"Running {total_tests} tests in a single pool of {MAX_WORKERS} workers")
 
     from sqlalchemy import func as sql_func
 
-    # Process in parallel batches
-    for batch_start in range(0, total_tests, PARALLEL_BATCH_SIZE):
-        batch = tasks[batch_start:batch_start + PARALLEL_BATCH_SIZE]
+    # Country hint for OpenAI web_search user_location (FR scans get FR-grounded URLs).
+    # Falls back to FR if domain brief didn't capture a country code.
+    scan_country = (scan.config or {}).get("domain_brief", {}).get("country") or "FR"
+    openai_model = settings.task_models.get("scan_test_openai", "gpt-4.1-mini")
 
-        # Submit LLM calls to thread pool (I/O-bound HTTP calls — safe to parallelize)
-        with ThreadPoolExecutor(max_workers=PARALLEL_BATCH_SIZE) as executor:
-            futures = {}
-            for question, persona, provider, llm_client in batch:
+    # Single ThreadPoolExecutor over ALL tasks — no batching = no head-of-line blocking
+    # (a slow OpenAI call no longer holds back Gemini results in the same batch).
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {}
+        for question, persona, provider, llm_client in tasks:
+            if provider == "openai":
+                # Direct OpenAI path — bypasses LLMClient for tighter retry + faster
+                # web_search_preview tool config (see adapters/llm_scanner.py module docstring)
+                future = executor.submit(
+                    test_question_openai_direct,
+                    question=question.question,
+                    persona=persona.data or {},
+                    target_domain=target_domain,
+                    api_key=settings.openai_api_key,
+                    model=openai_model,
+                    brand_analyzer=brand_analyzer,
+                    country=scan_country,
+                )
+            else:
+                # Gemini still goes through LLMClient (grounding works well, no quick win to chase)
                 future = executor.submit(
                     test_question,
                     question=question.question,
@@ -191,106 +210,108 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
                     target_domain=target_domain,
                     brand_analyzer=brand_analyzer,
                 )
-                futures[future] = (question, persona, provider)
+            futures[future] = (question, persona, provider)
 
-            # Collect results as they complete (DB writes in main thread — safe)
-            for future in as_completed(futures):
-                question, persona, provider = futures[future]
-                try:
-                    result = future.result()
+        # Collect results as they complete (DB writes in main thread — safe).
+        # Single stream, no batches: as soon as ANY task finishes (Gemini in 15s
+        # or OpenAI in 30s), we persist + update progress immediately.
+        for future in as_completed(futures):
+            question, persona, provider = futures[future]
+            try:
+                result = future.result()
 
-                    db.add(ScanLLMResult(
-                        scan_id=scan_id,
-                        question_id=question.id,
-                        provider=result["provider"],
-                        model=result.get("model"),
-                        response_text=result.get("response_text", ""),
-                        citations=result.get("citations", []),
-                        target_cited=result["target_cited"],
-                        target_position=result["target_position"],
-                        total_citations=result["total_citations"],
-                        competitor_domains=result["competitor_domains"],
-                        brand_mentions=result.get("brand_mentions", []),
-                        brand_analysis=result.get("brand_analysis", {}),
-                        duration_ms=result.get("duration_ms"),
-                        input_tokens=result.get("input_tokens"),
-                        output_tokens=result.get("output_tokens"),
-                    ))
+                db.add(ScanLLMResult(
+                    scan_id=scan_id,
+                    question_id=question.id,
+                    provider=result["provider"],
+                    model=result.get("model"),
+                    response_text=result.get("response_text", ""),
+                    citations=result.get("citations", []),
+                    target_cited=result["target_cited"],
+                    target_position=result["target_position"],
+                    total_citations=result["total_citations"],
+                    competitor_domains=result["competitor_domains"],
+                    brand_mentions=result.get("brand_mentions", []),
+                    brand_analysis=result.get("brand_analysis", {}),
+                    duration_ms=result.get("duration_ms"),
+                    input_tokens=result.get("input_tokens"),
+                    output_tokens=result.get("output_tokens"),
+                ))
 
-                    if result["target_cited"]:
-                        target_cited_count += 1
-                    if result.get("brand_analysis", {}).get("marque_cible_mentionnee"):
-                        brand_mentioned_count += 1
+                if result["target_cited"]:
+                    target_cited_count += 1
+                if result.get("brand_analysis", {}).get("marque_cible_mentionnee"):
+                    brand_mentioned_count += 1
 
-                    # Auto-enrich: collect new brands from LLM responses
-                    for mention in result.get("brand_mentions", []):
-                        bname = mention.get("brand_name_groupby") or mention.get("brand_name")
-                        if not bname or len(bname) < 2:
-                            continue
+                # Auto-enrich: collect new brands from LLM responses
+                for mention in result.get("brand_mentions", []):
+                    bname = mention.get("brand_name_groupby") or mention.get("brand_name")
+                    if not bname or len(bname) < 2:
+                        continue
 
-                        existing = db.query(ClientBrand).filter(
-                            ClientBrand.client_id == scan.client_id,
-                            sql_func.lower(ClientBrand.name) == bname.lower(),
-                        ).first()
+                    existing = db.query(ClientBrand).filter(
+                        ClientBrand.client_id == scan.client_id,
+                        sql_func.lower(ClientBrand.name) == bname.lower(),
+                    ).first()
 
-                        if not existing:
-                            new_brand = ClientBrand(
-                                client_id=scan.client_id,
-                                name=bname,
-                                canonical_name=bname,
-                                last_seen_at=datetime.utcnow(),
-                                detected_in_scan_id=scan_id,
-                                detection_source="llm_response",
-                            )
-                            db.add(new_brand)
-                            db.flush()
-                            brand_id = new_brand.id
-                        else:
-                            existing.last_seen_at = datetime.utcnow()
-                            brand_id = existing.id
+                    if not existing:
+                        new_brand = ClientBrand(
+                            client_id=scan.client_id,
+                            name=bname,
+                            canonical_name=bname,
+                            last_seen_at=datetime.utcnow(),
+                            detected_in_scan_id=scan_id,
+                            detection_source="llm_response",
+                        )
+                        db.add(new_brand)
+                        db.flush()
+                        brand_id = new_brand.id
+                    else:
+                        existing.last_seen_at = datetime.utcnow()
+                        brand_id = existing.id
 
-                        sbc_exists = db.query(ScanBrandClassification).filter(
-                            ScanBrandClassification.scan_id == scan_id,
-                            ScanBrandClassification.brand_id == brand_id,
-                        ).first()
-                        if not sbc_exists:
-                            db.add(ScanBrandClassification(
-                                scan_id=scan_id,
-                                brand_id=brand_id,
-                                classification='unclassified',
-                                classified_by='auto',
-                                source='llm_response',
-                            ))
+                    sbc_exists = db.query(ScanBrandClassification).filter(
+                        ScanBrandClassification.scan_id == scan_id,
+                        ScanBrandClassification.brand_id == brand_id,
+                    ).first()
+                    if not sbc_exists:
+                        db.add(ScanBrandClassification(
+                            scan_id=scan_id,
+                            brand_id=brand_id,
+                            classification='unclassified',
+                            classified_by='auto',
+                            source='llm_response',
+                        ))
 
-                    completed += 1
-                    logger.info(f"Test {completed}/{total_tests}: {provider} | "
-                               f"cited={result['target_cited']} | "
-                               f"brand={result.get('brand_analysis', {}).get('marque_cible_mentionnee', False)} | "
-                               f"{result.get('duration_ms')}ms")
+                completed += 1
+                logger.info(f"Test {completed}/{total_tests}: {provider} | "
+                           f"cited={result['target_cited']} | "
+                           f"brand={result.get('brand_analysis', {}).get('marque_cible_mentionnee', False)} | "
+                           f"{result.get('duration_ms')}ms")
 
-                    # Log LLM usage for cost monitoring
-                    from adapters.llm_logger import log_llm_usage
-                    log_llm_usage(
-                        db, provider=result["provider"],
-                        model=result.get("model", "unknown"),
-                        operation="scan_test",
-                        input_tokens=result.get("input_tokens", 0),
-                        output_tokens=result.get("output_tokens", 0),
-                        duration_ms=result.get("duration_ms"),
-                        scan_id=scan_id, client_id=str(scan.client_id),
-                    )
+                # Log LLM usage for cost monitoring
+                from adapters.llm_logger import log_llm_usage
+                log_llm_usage(
+                    db, provider=result["provider"],
+                    model=result.get("model", "unknown"),
+                    operation="scan_test",
+                    input_tokens=result.get("input_tokens", 0),
+                    output_tokens=result.get("output_tokens", 0),
+                    duration_ms=result.get("duration_ms"),
+                    scan_id=scan_id, client_id=str(scan.client_id),
+                )
 
-                except Exception as e:
-                    logger.error(f"Test failed ({provider}): {e}")
-                    errors += 1
-                    completed += 1
+            except Exception as e:
+                logger.error(f"Test failed ({provider}): {e}")
+                errors += 1
+                completed += 1
 
-                # Per-test progress update (Goal-Gradient: user sees 1/6, 2/6, 3/6...
-                # rather than waiting for whole batch). Tests take ~5-15s each so
-                # the extra commits are negligible vs LLM call cost.
-                scan.progress_pct = int(completed / total_tests * 100)
-                scan.progress_message = f"Scan LLM: {completed}/{total_tests} tests..."
-                db.commit()
+            # Per-test progress update (Goal-Gradient): user sees 1/N, 2/N, 3/N...
+            # in real time. Cheap commits (one row per LLM call which costs orders
+            # of magnitude more time than the commit itself).
+            scan.progress_pct = int(completed / total_tests * 100)
+            scan.progress_message = f"Scan LLM: {completed}/{total_tests} tests..."
+            db.commit()
 
     # --- Final ---
     success = max(completed - errors, 1)
