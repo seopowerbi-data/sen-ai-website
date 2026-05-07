@@ -1068,16 +1068,12 @@ const isReviewing = effectiveView !== null && (
                        filter: 'all',
                        total: ${warnings.length},
                        prios: ${JSON.stringify(warningPrios)},
-                       passes(i) {
-                         if (this.dismissed[i]) return false;
-                         if (this.filter === 'all') return true;
-                         if (this.filter === 'critical_plus') return ['critical', 'medium'].includes(this.prios[i]);
-                         if (this.filter === 'critical') return this.prios[i] === 'critical';
-                         return true;
-                       },
-                       get visible() {
+                       countFor(f) {
                          let n = 0;
-                         for (let i = 0; i < this.total; i++) if (this.passes(i)) n++;
+                         for (let i = 0; i < this.total; i++) {
+                           if (this.dismissed[i]) continue;
+                           if (f === 'all' || this.prios[i] === f) n++;
+                         }
                          return n;
                        }
                      }`}>
@@ -1089,37 +1085,41 @@ const isReviewing = effectiveView !== null && (
                   <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
                 </svg>
                 <span class:list={['text-sm font-medium', c.text]}>
-                  <span x-text="visible">{warnings.length}</span> of {totalQ} question{totalQ > 1 ? 's' : ''} flagged{ratio > 0 ? ` (${Math.round(ratio * 100)}%)` : ''}
+                  <span x-text="countFor(filter)">{warnings.length}</span> of {totalQ} question{totalQ > 1 ? 's' : ''} flagged{ratio > 0 ? ` (${Math.round(ratio * 100)}%)` : ''}
                 </span>
                 <span class:list={['text-xs ml-auto', c.subtext]}>{summaryText}</span>
               </summary>
               <div class:list={['border-t px-4 py-3 max-h-96 overflow-y-auto', c.innerBg]}>
                 {/* Priority filter pills + Dismiss-all */}
                 <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
-                  <div class="flex items-center gap-1.5">
+                  <div class="flex items-center gap-1.5 flex-wrap">
                     {[
-                      { key: 'all',           label: 'All',          n: warnings.length },
-                      { key: 'critical_plus', label: 'Critical +',   n: critCount + medCount },
-                      { key: 'critical',      label: 'Critical only', n: critCount },
+                      { key: 'all',      label: 'All',      dot: 'bg-charcoal-dark', activeBg: 'bg-charcoal-dark text-white border-charcoal-dark' },
+                      { key: 'critical', label: 'Critical', dot: 'bg-red-500',       activeBg: 'bg-red-100 text-red-800 border-red-400' },
+                      { key: 'medium',   label: 'Medium',   dot: 'bg-amber-500',     activeBg: 'bg-amber-100 text-amber-800 border-amber-400' },
+                      { key: 'low',      label: 'Low',      dot: 'bg-gray-400',      activeBg: 'bg-gray-100 text-gray-700 border-gray-400' },
                     ].map(p => (
                       <button type="button"
                               @click={`filter = '${p.key}'`}
-                              :class={`filter === '${p.key}' ? 'bg-charcoal-dark text-white' : 'bg-white/70 text-charcoal-light hover:bg-white'`}
-                              class="text-[11px] px-2 py-1 rounded border border-gray-200 transition-colors flex items-center gap-1">
-                        <span>{p.label}</span>
-                        <span class="text-[10px] opacity-70">({p.n})</span>
+                              :class={`filter === '${p.key}' ? '${p.activeBg}' : 'bg-white/70 text-charcoal-light border-gray-200 hover:bg-white'`}
+                              x-show={`countFor('${p.key}') > 0 || filter === '${p.key}'`}
+                              class="text-[11px] px-2 py-1 rounded border transition-colors flex items-center gap-1.5">
+                        {p.key !== 'all' && <span class={`w-1.5 h-1.5 rounded-full ${p.dot} shrink-0`}></span>}
+                        <span class="font-medium">{p.label}</span>
+                        <span class="text-[10px] opacity-70">(<span x-text={`countFor('${p.key}')`}></span>)</span>
                       </button>
                     ))}
                   </div>
                   <button type="button"
-                          @click="for (let i = 0; i < total; i++) if (passes(i)) dismissed[i] = true"
-                          x-show="visible > 0"
+                          @click="(() => { const d = {...dismissed}; for (let i = 0; i < total; i++) { if (d[i]) continue; if (filter === 'all' || prios[i] === filter) d[i] = true; } dismissed = d; })()"
+                          x-show="countFor(filter) > 0"
+                          title="Hides these warnings from the panel only — questions stay active in the scan. Refresh the page to see them again. To actually skip a question in the scan, toggle it off in the personas list below."
                           class:list={['shrink-0 text-[11px] px-2 py-1 rounded transition-colors whitespace-nowrap', 'bg-white/70 hover:bg-white border', c.border, c.subtext]}>
-                    Dismiss visible
+                    Hide from this view
                   </button>
                 </div>
                 <p class:list={['text-[10px] mb-2 italic', c.subtext]}>
-                  Priority weighted by topic traffic share (high-traffic topics → critical). Dismiss noise to focus.
+                  Priority weighted by topic traffic share (high-traffic topics → critical). Hide noise to focus, then toggle off questions you don't want in the scan via the personas list below.
                 </p>
                 <ul class="space-y-2">
                   {warnings.map((w: any, i: number) => {
@@ -1133,9 +1133,12 @@ const isReviewing = effectiveView !== null && (
                       medium:   'bg-amber-100 text-amber-700',
                       low:      'bg-gray-100 text-gray-600',
                     };
+                    // Inline x-show condition with direct prop access — most reliable Alpine reactivity.
+                    // The row's priority is server-side known, so we just compare filter to that constant.
+                    const prio = w.priority || 'low';
                     return (
-                      <li class:list={['text-xs text-charcoal-dark flex gap-2 items-start group/row border rounded-md px-2 py-1.5', prioColors[w.priority || 'low']]}
-                          x-show={`passes(${i})`}>
+                      <li class:list={['text-xs text-charcoal-dark flex gap-2 items-start group/row border rounded-md px-2 py-1.5', prioColors[prio]]}
+                          x-show={`!dismissed[${i}] && (filter === 'all' || filter === '${prio}')`}>
                         <span class={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wide ${prioPill[w.priority || 'low']}`}
                               title={`Topic share: ${w.topic_share_pct ?? '?'}% — ${w.priority || 'low'} priority`}>
                           {w.priority || 'low'}
@@ -1163,8 +1166,8 @@ const isReviewing = effectiveView !== null && (
                           {w.reason && <p class:list={['text-[10px] italic', c.subtext]}>{w.reason}</p>}
                         </div>
                         <button type="button"
-                                @click={`dismissed[${i}] = true`}
-                                title="Dismiss this warning"
+                                @click={`dismissed = {...dismissed, [${i}]: true}`}
+                                title="Hide from this view (does not disable the question — use the toggle in the personas list below to skip it in the scan)"
                                 class="shrink-0 w-5 h-5 rounded text-charcoal-light hover:bg-gray-200 hover:text-charcoal-dark opacity-0 group-hover/row:opacity-100 transition-opacity flex items-center justify-center">
                           <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
                         </button>
@@ -1172,7 +1175,7 @@ const isReviewing = effectiveView !== null && (
                     );
                   })}
                 </ul>
-                <p class:list={['text-[11px] mt-3 italic', c.subtext]} x-show="visible === 0">
+                <p class:list={['text-[11px] mt-3 italic', c.subtext]} x-show="countFor(filter) === 0">
                   No warnings match the current filter.
                 </p>
               </div>
