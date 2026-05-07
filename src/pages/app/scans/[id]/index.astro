@@ -1027,12 +1027,21 @@ const isReviewing = effectiveView !== null && (
         <p class="text-sm text-charcoal-light mb-4"><span class="font-medium text-charcoal-dark">Review and toggle off</span> what you don't need. Each active question counts as 1 scan credit when you launch.</p>
 
         {/* Heuristic warnings (B.1 type inferences + B.2 coherence checks).
-            Shown collapsed by default; user can expand to review off-topic / duplicate /
-            inferred-type questions before spending credits to scan them.
-            Non-blocking: just surfaces info, doesn't disable any question. */}
+            Non-blocking: shows ratio (X of Y) with severity color + per-warning Dismiss
+            + Dismiss-all bulk action. User can hide noise to focus on real signals. */}
         {(() => {
           const warnings = (scan.summary && Array.isArray(scan.summary.warnings)) ? scan.summary.warnings : [];
           if (warnings.length === 0) return null;
+          const totalQ = personasData?.totals?.total_questions || 0;
+          const ratio = totalQ > 0 ? warnings.length / totalQ : 0;
+          // Severity color: <10% emerald, 10-30% amber, >30% red
+          const severity = ratio < 0.1 ? 'emerald' : ratio < 0.3 ? 'amber' : 'red';
+          const colors: any = {
+            emerald: { bg: 'bg-emerald-50/60', border: 'border-emerald-200', icon: 'text-emerald-600', text: 'text-emerald-900', subtext: 'text-emerald-700', innerBg: 'bg-white/40 border-emerald-200', hover: 'hover:bg-emerald-50' },
+            amber:   { bg: 'bg-amber-50/60',   border: 'border-amber-200',   icon: 'text-amber-600',   text: 'text-amber-900',   subtext: 'text-amber-700',   innerBg: 'bg-white/40 border-amber-200',   hover: 'hover:bg-amber-50' },
+            red:     { bg: 'bg-red-50/60',     border: 'border-red-200',     icon: 'text-red-600',     text: 'text-red-900',     subtext: 'text-red-700',     innerBg: 'bg-white/40 border-red-200',     hover: 'hover:bg-red-50' },
+          };
+          const c = colors[severity];
           const counts: any = {};
           for (const w of warnings) { const t = w.type || 'unknown'; counts[t] = (counts[t] || 0) + 1; }
           const labels: any = {
@@ -1042,27 +1051,40 @@ const isReviewing = effectiveView !== null && (
           };
           const summaryText = Object.entries(counts).map(([t, n]) => `${n} ${labels[t] || t}`).join(' · ');
           return (
-            <details class="mb-6 bg-amber-50/60 border border-amber-200 rounded-lg overflow-hidden group">
-              <summary class="px-4 py-2.5 cursor-pointer hover:bg-amber-50 transition-colors flex items-center gap-2.5">
-                <svg class="w-4 h-4 text-amber-600 shrink-0 transition-transform group-open:rotate-90" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <details class:list={['mb-6 rounded-lg overflow-hidden group border', c.bg, c.border]}
+                     x-data={`{ dismissed: {}, total: ${warnings.length}, get visible() { return this.total - Object.keys(this.dismissed).filter(k => this.dismissed[k]).length; } }`}>
+              <summary class:list={['px-4 py-2.5 cursor-pointer transition-colors flex items-center gap-2.5', c.hover]}>
+                <svg class:list={['w-4 h-4 shrink-0 transition-transform group-open:rotate-90', c.icon]} fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
                 </svg>
-                <svg class="w-4 h-4 text-amber-600 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <svg class:list={['w-4 h-4 shrink-0', c.icon]} fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
                 </svg>
-                <span class="text-sm font-medium text-amber-900">{warnings.length} question{warnings.length > 1 ? 's' : ''} flagged for review</span>
-                <span class="text-xs text-amber-700 ml-auto">{summaryText}</span>
+                <span class:list={['text-sm font-medium', c.text]}>
+                  <span x-text="visible">{warnings.length}</span> of {totalQ} question{totalQ > 1 ? 's' : ''} flagged{ratio > 0 ? ` (${Math.round(ratio * 100)}%)` : ''}
+                </span>
+                <span class:list={['text-xs ml-auto', c.subtext]}>{summaryText}</span>
               </summary>
-              <div class="border-t border-amber-200 px-4 py-3 max-h-80 overflow-y-auto bg-white/40">
-                <p class="text-[11px] text-amber-800 mb-3">Heuristic checks — not errors. Review these and edit / disable any that aren't worth a scan credit.</p>
+              <div class:list={['border-t px-4 py-3 max-h-80 overflow-y-auto', c.innerBg]}>
+                <div class="flex items-center justify-between mb-3 gap-3">
+                  <p class:list={['text-[11px]', c.subtext]}>
+                    Heuristic checks — not errors. Dismiss noise to focus on real issues; toggle off questions in the list below if you don't want to spend credits on them.
+                  </p>
+                  <button type="button"
+                          @click="dismissed = Object.fromEntries(Array.from({length: total}, (_, i) => [i, true]))"
+                          x-show="visible > 0"
+                          class:list={['shrink-0 text-[11px] px-2 py-1 rounded transition-colors whitespace-nowrap', 'bg-white/70 hover:bg-white border', c.border, c.subtext]}>
+                    Dismiss all
+                  </button>
+                </div>
                 <ul class="space-y-2">
                   {warnings.map((w: any, i: number) => (
-                    <li class="text-xs text-charcoal-dark flex gap-2">
-                      <span class={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wide ${
-                        w.type === 'duplicate' ? 'bg-orange-100 text-orange-700' :
-                        w.type === 'off_topic' ? 'bg-amber-100 text-amber-700' :
-                        'bg-blue-100 text-blue-700'
-                      }`}>{labels[w.type] || w.type}</span>
+                    <li class="text-xs text-charcoal-dark flex gap-2 items-start group/row" x-show={`!dismissed[${i}]`}>
+                      <span class:list={['shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wide', {
+                        'bg-orange-100 text-orange-700': w.type === 'duplicate',
+                        'bg-amber-100 text-amber-700': w.type === 'off_topic',
+                        'bg-blue-100 text-blue-700': w.type === 'type_inferred',
+                      }]}>{labels[w.type] || w.type}</span>
                       <div class="min-w-0 flex-1">
                         <p class="text-charcoal-light text-[10px]">
                           <span class="font-medium">{w.persona || '?'}</span>
@@ -1077,11 +1099,20 @@ const isReviewing = effectiveView !== null && (
                             <p class="text-charcoal-dark/80 truncate" title={w.question_b}>B: {w.question_b}</p>
                           </div>
                         )}
-                        {w.reason && <p class="text-amber-700 text-[10px] italic">{w.reason}</p>}
+                        {w.reason && <p class:list={['text-[10px] italic', c.subtext]}>{w.reason}</p>}
                       </div>
+                      <button type="button"
+                              @click={`dismissed[${i}] = true`}
+                              title="Dismiss this warning"
+                              class="shrink-0 w-5 h-5 rounded text-charcoal-light hover:bg-gray-200 hover:text-charcoal-dark opacity-0 group-hover/row:opacity-100 transition-opacity flex items-center justify-center">
+                        <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                      </button>
                     </li>
                   ))}
                 </ul>
+                <p class:list={['text-[11px] mt-3 italic', c.subtext]} x-show="visible === 0">
+                  All warnings dismissed.
+                </p>
               </div>
             </details>
           );

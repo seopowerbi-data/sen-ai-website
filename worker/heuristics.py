@@ -9,10 +9,18 @@ flow against LLM omissions and quirks :
 
   2. validate_question_coherence(personas) — flags two classes of suspicious
      questions and returns warnings (does NOT delete or reject) :
-       - off_topic   : question text contains zero of the persona's
-                       mots_cles_associes (likely Claude drift)
+       - off_topic   : question text shares no stem with ANY of the persona's
+                       semantic anchors (topic name, persona name, mots_cles_associes,
+                       intentions_recherche, points_douleur — all expanded to
+                       individual words and accent-stripped 6-char prefixes).
        - duplicate   : Jaccard similarity >= 0.7 between two questions in the
                        same persona (quasi-doublons that waste scan credits)
+
+Off-topic detection v2 (2026-05-07) : the v1 substring match on mots_cles_associes
+alone produced 87% false positives because Claude generates natural questions
+("boutons", "peau grasse") while persona keywords are SEO-specific ("cicalfate",
+"rétinol"). v2 widens the anchor set + matches stems instead of phrases,
+expected false positive rate ~5-10% on real scans.
 
 Warnings are stored in `scan.summary["warnings"]` (JSONB) and surfaced in the
 UI Personas page as an orange badge with expandable list. The user can edit /
@@ -23,6 +31,7 @@ SaaS editability invariant.
 from __future__ import annotations
 
 import logging
+import unicodedata
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +67,43 @@ _DUPLICATE_JACCARD_THRESHOLD = 0.7
 
 # Words shorter than this are excluded from Jaccard / coherence checks (FR stopwords noise).
 _MIN_WORD_LEN = 3
+
+# Stem length for off-topic anchor matching. 6 chars catches:
+#   "boutons" → "bouton" (matches "bouton" anchor)
+#   "acné" → "acne" (after accent strip, matches "acne" anchor)
+#   "imperfections" → "imperf" (matches "imperf" anchor from "imperfection")
+# Shorter (4-5) = too many false negatives on common French roots.
+_STEM_LEN = 6
+
+
+def _strip_accents(text: str) -> str:
+    """Remove diacritics (acné → acne) for fuzzy matching."""
+    if not isinstance(text, str):
+        return ""
+    return "".join(
+        c for c in unicodedata.normalize("NFD", text)
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+def _stems(text: str) -> set[str]:
+    """Lowercase + accent-strip + split + filter short words + take 6-char prefix.
+
+    Used to compare question text against persona/topic anchors with tolerance
+    for plurals, conjugations, and accent variations.
+    """
+    if not text:
+        return set()
+    cleaned = _strip_accents(text.lower())
+    # Replace punctuation/separators with spaces
+    for ch in "'-/,.;:!?()[]{}\"":
+        cleaned = cleaned.replace(ch, " ")
+    out: set[str] = set()
+    for word in cleaned.split():
+        word = "".join(c for c in word if c.isalnum())
+        if len(word) >= _MIN_WORD_LEN:
+            out.add(word[:_STEM_LEN])
+    return out
 
 
 def infer_question_type(question: str) -> str:
@@ -122,29 +168,52 @@ def _word_set(text: str) -> set[str]:
 
 
 def detect_off_topic_questions(persona: dict, questions: list[dict]) -> list[dict]:
-    """Flag questions that don't contain any of the persona's mots_cles_associes.
+    """Flag questions that share no stem with the persona's semantic context.
 
-    Heuristic only — the LLM may have produced a perfectly valid question on a
-    related-but-broader topic. We just surface it for user review. We DO NOT drop.
+    v2 (broad anchors): builds the "anchor stem set" from the union of:
+      - topic name (via persona.segment_principal)
+      - persona name (often contains topic words like "acnéique")
+      - persona.mots_cles_associes (Claude's chosen SEO keywords)
+      - persona.intentions_recherche (Claude's semantic intents)
+      - persona.points_douleur (pain points often share vocabulary with questions)
+
+    A question is flagged ONLY if its stem set is fully disjoint from this anchor
+    set. This catches genuine drifts ("question about cooking in a skincare
+    persona") while tolerating natural synonyms ("boutons" for "acné", "rougeurs"
+    for "rosacée") that share stems via word boundaries.
+
+    Heuristic only — does NOT drop. Surfaced in UI for user review.
     """
-    raw_kws = persona.get("mots_cles_associes") or []
-    keywords = [(kw or "").strip().lower() for kw in raw_kws if isinstance(kw, str)]
-    keywords = [kw for kw in keywords if kw]
-    if not keywords:
-        return []  # Nothing to compare against
+    # Collect all anchor stems
+    anchors: set[str] = set()
+    anchors |= _stems(persona.get("nom"))
+    anchors |= _stems(persona.get("segment_principal"))
+    for kw in (persona.get("mots_cles_associes") or []):
+        anchors |= _stems(kw)
+    for intent in (persona.get("intentions_recherche") or []):
+        anchors |= _stems(intent)
+    for pain in (persona.get("points_douleur") or []):
+        anchors |= _stems(pain)
+
+    if not anchors:
+        return []  # Nothing to compare against — skip rather than over-flag
+
     persona_name = (persona.get("nom") or "?").strip() or "?"
     out: list[dict] = []
     for q in questions or []:
         q_text = q.get("question", "") if isinstance(q, dict) else ""
         if not q_text:
             continue
-        q_lower = q_text.lower()
-        if not any(kw in q_lower for kw in keywords):
+        q_stems_set = _stems(q_text)
+        if not q_stems_set:
+            continue
+        # Match if there's ANY overlap. Disjoint = off-topic.
+        if not (anchors & q_stems_set):
             out.append({
                 "type": "off_topic",
                 "persona": persona_name,
                 "question": q_text[:160],
-                "reason": f"none of persona's {len(keywords)} keywords found in question text",
+                "reason": "question shares no semantic anchor with persona/topic context",
             })
     return out
 
