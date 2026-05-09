@@ -1,0 +1,272 @@
+---
+/**
+ * Workspace Settings → My primary brands
+ *
+ * UX Laws:
+ * - Recognition over Recall: shows currently-selected brands at top, available below
+ * - Aesthetic-Usability: chips style with explicit Add / Remove / Reorder buttons
+ * - Hick's Law: only the brands of THIS client, not the world
+ * - Postel's Law: server validates UUIDs against client membership
+ *
+ * Lets the user curate Client.primary_brand_ids — the workspace default for
+ * content-gen brand promotion. Backed by GET/PUT /api/clients/{id}/promotion.
+ */
+export const prerender = false;
+import DashboardLayout from '../../../layouts/DashboardLayout.astro';
+
+const token = Astro.cookies.get('token')?.value;
+if (!token) return Astro.redirect('/login');
+
+let clientId: string | null = null;
+let clientName = '';
+try {
+  const res = await fetch('http://api:8000/api/clients/', {
+    headers: { Cookie: `token=${token}` },
+    signal: AbortSignal.timeout(3000),
+  });
+  const clients = res.ok ? await res.json() : [];
+  if (clients[0]) {
+    clientId = clients[0].id;
+    clientName = clients[0].name;
+  }
+} catch {}
+
+let initialData: any = { primary_brand_ids: [], all_brands: [] };
+if (clientId) {
+  try {
+    const res = await fetch(`http://api:8000/api/clients/${clientId}/promotion`, {
+      headers: { Cookie: `token=${token}` },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.ok) initialData = await res.json();
+  } catch {}
+}
+---
+
+<DashboardLayout title="My primary brands" activeSection="settings">
+  <div class="p-8 max-w-4xl">
+
+    <div class="mb-6">
+      <a href="/app/settings" class="text-xs text-charcoal-light hover:text-coral inline-flex items-center gap-1 mb-2">
+        <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+        Settings
+      </a>
+      <h1 class="text-2xl font-bold text-charcoal-dark">My primary brands</h1>
+      <p class="text-sm text-charcoal-light mt-1">
+        For workspace <span class="font-medium text-charcoal-dark">{clientName || '?'}</span>. These are the brands that content generation (FAQ, articles) will <strong class="text-charcoal-dark">promote</strong> when you click "Generate" on any opportunity — even on a competitor scan.
+      </p>
+    </div>
+
+    {/* Info banner */}
+    <details class="mb-6 bg-blue-50/50 border border-blue-100 rounded-lg overflow-hidden group">
+      <summary class="px-4 py-2.5 cursor-pointer hover:bg-blue-50 transition-colors flex items-center gap-2">
+        <svg class="w-4 h-4 text-blue-500 shrink-0 transition-transform group-open:rotate-90" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+        </svg>
+        <svg class="w-4 h-4 text-blue-500 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+        </svg>
+        <span class="text-sm font-medium text-blue-900">Why does this matter ?</span>
+      </summary>
+      <div class="px-4 py-3 border-t border-blue-100 text-xs text-blue-900/90 leading-relaxed space-y-2">
+        <p>When you scan a <strong>competitor</strong> (e.g., laroche-posay.fr) and click "Generate FAQ" on an opportunity, the generated content has to know which brands to push. Without this list, the system has to fall back on auto-detection per scan, which can miss your less-mentioned brands.</p>
+        <p>The <strong>first brand</strong> in your list is treated as the <strong>lead brand</strong> — content gives it the spotlight. Other brands are co-promoted as "sister brands" when relevant. Reorder with <span class="font-medium">↑↓</span>.</p>
+        <p>You can also <strong>override per scan</strong> later (e.g., "on this scan only push Avène") — that doesn't change this workspace default.</p>
+      </div>
+    </details>
+
+    {!clientId ? (
+      <div class="bg-amber-50 border border-amber-200 rounded-xl p-6 text-sm text-amber-900">
+        No workspace found. Create one first, then come back here.
+      </div>
+    ) : (
+      <div x-data={`primaryBrands(${JSON.stringify(initialData)}, '${clientId}')`}>
+
+        {/* Selected (priority list) */}
+        <div class="bg-white rounded-xl border border-gray-200 mb-6 overflow-hidden">
+          <div class="px-5 py-3 border-b border-gray-100 flex items-baseline justify-between">
+            <h2 class="text-sm font-semibold text-charcoal-dark">
+              Selected <span class="text-charcoal-light text-xs font-normal">(<span x-text="selected.length"></span>)</span>
+            </h2>
+            <p class="text-[11px] text-charcoal-light italic">First = lead brand · drag-free reorder via ↑↓</p>
+          </div>
+          <div class="p-3">
+            <p x-show="selected.length === 0" class="text-xs text-charcoal-light text-center py-6 italic">
+              No primary brand set yet. Add at least one from the list below.
+            </p>
+            <ul class="space-y-1.5">
+              <template x-for="(b, i) in selected" :key="b.id">
+                <li class="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-50 hover:bg-gray-100 transition-colors group/row">
+                  <span class="text-[10px] font-mono text-charcoal-light w-5 text-center">
+                    <span x-text="i + 1"></span>
+                  </span>
+                  <span class="text-sm font-medium text-charcoal-dark flex-1 truncate" x-text="b.name"></span>
+                  <span x-show="b.domain" class="text-[10px] text-charcoal-light/70 truncate max-w-[200px]" x-text="b.domain"></span>
+                  <span x-show="i === 0" class="shrink-0 text-[9px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded bg-coral/10 text-coral">Lead</span>
+                  <div class="flex items-center gap-0.5 opacity-0 group-hover/row:opacity-100 transition-opacity">
+                    <button type="button" @click="moveUp(i)" :disabled="i === 0"
+                            class="w-6 h-6 rounded text-charcoal-light hover:bg-gray-200 hover:text-charcoal-dark disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center"
+                            title="Move up">
+                      <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 15l7-7 7 7"/></svg>
+                    </button>
+                    <button type="button" @click="moveDown(i)" :disabled="i === selected.length - 1"
+                            class="w-6 h-6 rounded text-charcoal-light hover:bg-gray-200 hover:text-charcoal-dark disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center"
+                            title="Move down">
+                      <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                    </button>
+                    <button type="button" @click="remove(b)"
+                            class="w-6 h-6 rounded text-charcoal-light hover:bg-red-100 hover:text-red-600 flex items-center justify-center ml-1"
+                            title="Remove from primary brands">
+                      <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                    </button>
+                  </div>
+                </li>
+              </template>
+            </ul>
+          </div>
+        </div>
+
+        {/* Available */}
+        <div class="bg-white rounded-xl border border-gray-200 mb-6 overflow-hidden">
+          <div class="px-5 py-3 border-b border-gray-100 flex items-baseline justify-between gap-3">
+            <h2 class="text-sm font-semibold text-charcoal-dark">
+              Available brands <span class="text-charcoal-light text-xs font-normal">(<span x-text="available.length"></span>)</span>
+            </h2>
+            <input type="text" x-model="search" placeholder="Search…"
+                   class="text-xs border border-gray-200 rounded-md px-2 py-1 outline-none focus:border-coral w-48" />
+          </div>
+          <div class="p-3 max-h-96 overflow-y-auto">
+            <p x-show="filteredAvailable.length === 0" class="text-xs text-charcoal-light text-center py-6 italic">
+              <span x-show="search">No brand matches your search.</span>
+              <span x-show="!search">All brands are already selected.</span>
+            </p>
+            <ul class="space-y-1">
+              <template x-for="b in filteredAvailable" :key="b.id">
+                <li class="flex items-center gap-2 px-3 py-1.5 rounded-md hover:bg-gray-50 transition-colors group/row">
+                  <button type="button" @click="add(b)"
+                          class="shrink-0 w-6 h-6 rounded-md border border-gray-200 text-charcoal-light hover:border-coral hover:text-coral hover:bg-coral/5 transition-colors flex items-center justify-center"
+                          title="Add to primary brands">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+                  </button>
+                  <span class="text-sm text-charcoal-dark flex-1 truncate" x-text="b.name"></span>
+                  <span x-show="b.domain" class="text-[10px] text-charcoal-light/70 truncate max-w-[200px]" x-text="b.domain"></span>
+                  <span x-show="b.is_suggested" class="shrink-0 text-[9px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded bg-amber-50 text-amber-700"
+                        title="Auto-detected as your brand in past scans">Suggested</span>
+                </li>
+              </template>
+            </ul>
+          </div>
+        </div>
+
+        {/* Save bar */}
+        <div class="sticky bottom-4 bg-white rounded-xl border border-gray-200 shadow-lg p-4 flex items-center justify-between gap-4">
+          <div class="text-xs text-charcoal-light">
+            <span x-show="!hasChanges" class="text-emerald-600">✓ Saved</span>
+            <span x-show="hasChanges">Unsaved changes — selected: <span class="font-medium text-charcoal-dark" x-text="selected.length"></span></span>
+          </div>
+          <div class="flex items-center gap-2">
+            <button type="button" @click="reset()" x-show="hasChanges"
+                    class="text-sm text-charcoal-light hover:text-charcoal-dark px-3 py-1.5 rounded-md hover:bg-gray-50 transition-colors">
+              Discard
+            </button>
+            <button type="button" @click="save()" :disabled="!hasChanges || saving"
+                    :class="(!hasChanges || saving) ? 'opacity-50 cursor-not-allowed' : 'hover:bg-coral-dark hover:shadow-md'"
+                    class="text-sm bg-coral text-white px-4 py-1.5 rounded-md font-medium transition-all">
+              <span x-show="!saving">Save</span>
+              <span x-show="saving">Saving…</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+  </div>
+
+  <script is:inline>
+    document.addEventListener('alpine:init', () => {
+      window.Alpine.data('primaryBrands', (initial, clientId) => ({
+        clientId,
+        all: initial.all_brands || [],
+        initial: (initial.primary_brand_ids || []).slice(),
+        selected: [],
+        search: '',
+        saving: false,
+
+        init() {
+          // Build selected from is_primary in initial order
+          this.selected = this.all.filter(b => b.is_primary);
+        },
+
+        get available() {
+          const selectedIds = new Set(this.selected.map(b => b.id));
+          return this.all.filter(b => !selectedIds.has(b.id));
+        },
+
+        get filteredAvailable() {
+          const q = this.search.trim().toLowerCase();
+          if (!q) return this.available;
+          return this.available.filter(b =>
+            (b.name || '').toLowerCase().includes(q) ||
+            (b.domain || '').toLowerCase().includes(q)
+          );
+        },
+
+        get hasChanges() {
+          const currentIds = this.selected.map(b => b.id).join(',');
+          const initialIds = this.initial.join(',');
+          return currentIds !== initialIds;
+        },
+
+        add(b) {
+          if (!this.selected.find(x => x.id === b.id)) {
+            this.selected.push(b);
+          }
+        },
+
+        remove(b) {
+          const idx = this.selected.findIndex(x => x.id === b.id);
+          if (idx !== -1) this.selected.splice(idx, 1);
+        },
+
+        moveUp(i) {
+          if (i === 0) return;
+          const tmp = this.selected[i];
+          this.selected.splice(i, 1);
+          this.selected.splice(i - 1, 0, tmp);
+        },
+
+        moveDown(i) {
+          if (i >= this.selected.length - 1) return;
+          const tmp = this.selected[i];
+          this.selected.splice(i, 1);
+          this.selected.splice(i + 1, 0, tmp);
+        },
+
+        reset() {
+          // Restore selected from the all_brands list using stored initial order
+          this.selected = this.initial
+            .map(id => this.all.find(b => b.id === id))
+            .filter(Boolean);
+        },
+
+        async save() {
+          this.saving = true;
+          try {
+            const ids = this.selected.map(b => b.id);
+            const res = await fetch(`/api/clients/${this.clientId}/promotion`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ primary_brand_ids: ids }),
+            });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            this.initial = ids.slice();
+          } catch (e) {
+            alert('Save failed : ' + e.message);
+          } finally {
+            this.saving = false;
+          }
+        },
+      }));
+    });
+  </script>
+</DashboardLayout>
