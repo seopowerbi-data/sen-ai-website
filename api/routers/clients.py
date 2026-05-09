@@ -4,7 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from models import Client, ClientBrand, ClientCredit, ScanBrandClassification, UserClient, get_db
+from sqlalchemy.orm.attributes import flag_modified
+
+from models import Client, ClientBrand, ClientCredit, Job, ScanBrandClassification, UserClient, get_db
 from services.auth_service import get_current_user
 from services.request_context import current_request_method
 from services.sanitize import strip_tags
@@ -172,3 +174,95 @@ async def update_client_promotion(client_id: str, req: PromotionUpdate,
         "primary_brand_ids": req.primary_brand_ids,
         "count": len(req.primary_brand_ids),
     }
+
+
+# ── Workspace brief (client.apps.client_brief) ──────────────────────────
+# The workspace brief describes the COMPANY (not any single scanned domain).
+# It's injected into FAQ + article generation so the output sounds like the
+# user's brand even when generated from a competitor scan opportunity.
+
+class BriefUpdate(BaseModel):
+    brief: dict  # full brief object — caller is responsible for shape
+
+
+@router.get("/{client_id}/brief")
+async def get_client_brief(client_id: str, user=Depends(get_current_user),
+                           db: Session = Depends(get_db)):
+    """Return the workspace brief, or null if not yet generated."""
+    _check_client_access(client_id, user, db)
+    client = db.query(Client).filter(Client.id == client_id).first()
+    if not client:
+        raise HTTPException(404, "Client not found")
+    apps = client.apps or {}
+    return {"brief": apps.get("client_brief")}
+
+
+@router.post("/{client_id}/brief/generate")
+async def generate_client_brief(client_id: str, user=Depends(get_current_user),
+                                db: Session = Depends(get_db)):
+    """Enqueue a generate_client_brief worker job. Returns the job id for polling."""
+    _check_client_access(client_id, user, db)
+    client = db.query(Client).filter(Client.id == client_id).first()
+    if not client:
+        raise HTTPException(404, "Client not found")
+
+    # Block regeneration if user has explicitly edited — they should DELETE
+    # via PUT (with edited_by_user=false) before regenerating.
+    apps = client.apps or {}
+    existing = apps.get("client_brief") or {}
+    if existing.get("edited_by_user"):
+        raise HTTPException(
+            409,
+            "Brief has been manually edited — delete edited_by_user via PUT before regenerating",
+        )
+
+    # Avoid duplicate in-flight jobs
+    in_flight = (
+        db.query(Job)
+        .filter(
+            Job.client_id == client_id,
+            Job.job_type == "generate_client_brief",
+            Job.status.in_(["pending", "running"]),
+        )
+        .first()
+    )
+    if in_flight:
+        return {"ok": True, "job_id": str(in_flight.id), "status": in_flight.status,
+                "message": "Already in flight"}
+
+    job = Job(
+        client_id=client_id,
+        job_type="generate_client_brief",
+        status="pending",
+        payload={"client_id": client_id},
+        max_attempts=2,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return {"ok": True, "job_id": str(job.id), "status": "pending"}
+
+
+@router.put("/{client_id}/brief")
+async def update_client_brief(client_id: str, req: BriefUpdate,
+                              user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """Replace the workspace brief with a manual edit (sets edited_by_user=true).
+
+    Pass an explicit `edited_by_user: false` inside `brief` to re-allow regeneration.
+    """
+    _check_client_access(client_id, user, db)
+    client = db.query(Client).filter(Client.id == client_id).first()
+    if not client:
+        raise HTTPException(404, "Client not found")
+
+    new_brief = dict(req.brief)
+    # Default edited_by_user=true unless caller explicitly opts out (e.g., to clear flag)
+    if "edited_by_user" not in new_brief:
+        new_brief["edited_by_user"] = True
+
+    apps = dict(client.apps or {})
+    apps["client_brief"] = new_brief
+    client.apps = apps
+    flag_modified(client, "apps")
+    db.commit()
+    return {"ok": True, "edited_by_user": new_brief.get("edited_by_user", True)}

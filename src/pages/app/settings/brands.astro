@@ -32,6 +32,7 @@ try {
 } catch {}
 
 let initialData: any = { primary_brand_ids: [], all_brands: [] };
+let initialBrief: any = null;
 if (clientId) {
   try {
     const res = await fetch(`http://api:8000/api/clients/${clientId}/promotion`, {
@@ -39,6 +40,16 @@ if (clientId) {
       signal: AbortSignal.timeout(3000),
     });
     if (res.ok) initialData = await res.json();
+  } catch {}
+  try {
+    const res = await fetch(`http://api:8000/api/clients/${clientId}/brief`, {
+      headers: { Cookie: `token=${token}` },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      initialBrief = data.brief;
+    }
   } catch {}
 }
 ---
@@ -81,6 +92,55 @@ if (clientId) {
       </div>
     ) : (
       <div x-data={`primaryBrands(${JSON.stringify(initialData)}, '${clientId}')`}>
+
+        {/* Workspace brief panel — feeds Phase B/C content gen with brand voice context */}
+        <div class="bg-white rounded-xl border border-gray-200 mb-6 overflow-hidden"
+             x-data={`workspaceBrief(${JSON.stringify(initialBrief)}, '${clientId}')`}>
+          <div class="px-5 py-3 border-b border-gray-100 flex items-baseline justify-between gap-3">
+            <div>
+              <h2 class="text-sm font-semibold text-charcoal-dark">Workspace brief</h2>
+              <p class="text-[11px] text-charcoal-light italic mt-0.5">
+                Brand voice + positioning · injected into FAQ + article generation
+              </p>
+            </div>
+            <div class="flex items-center gap-2">
+              <span x-show="brief && !brief.edited_by_user" class="text-[10px] uppercase tracking-wide font-semibold px-2 py-1 rounded bg-blue-50 text-blue-700"
+                    title="Auto-generated — regenerate to refresh">Auto</span>
+              <span x-show="brief && brief.edited_by_user" class="text-[10px] uppercase tracking-wide font-semibold px-2 py-1 rounded bg-emerald-50 text-emerald-700"
+                    title="You edited this — regeneration is blocked">Edited</span>
+              <button type="button" @click="generate()" :disabled="generating || (brief && brief.edited_by_user)"
+                      :class="(generating || (brief && brief.edited_by_user)) ? 'opacity-50 cursor-not-allowed' : 'hover:bg-coral-dark'"
+                      class="text-xs bg-coral text-white px-3 py-1 rounded-md font-medium transition-all">
+                <span x-show="!generating && !brief">Generate</span>
+                <span x-show="!generating && brief">Regenerate</span>
+                <span x-show="generating">Generating…</span>
+              </button>
+            </div>
+          </div>
+          <div class="p-5 text-sm">
+            <p x-show="!brief" class="text-charcoal-light italic">
+              No workspace brief yet. Click Generate — uses your selected primary brands as input
+              (web-searched via OpenAI, falls back to Gemini / Claude). Takes ~10s.
+            </p>
+            <div x-show="brief" class="space-y-3">
+              <p><span class="text-[10px] uppercase tracking-wide font-semibold text-charcoal-light">Industry</span><br/>
+                <span class="text-charcoal-dark" x-text="brief?.industry"></span></p>
+              <p><span class="text-[10px] uppercase tracking-wide font-semibold text-charcoal-light">Overview</span><br/>
+                <span class="text-charcoal-dark" x-text="brief?.company_overview"></span></p>
+              <p><span class="text-[10px] uppercase tracking-wide font-semibold text-charcoal-light">Positioning</span><br/>
+                <span class="text-charcoal-dark" x-text="brief?.brand_positioning"></span></p>
+              <p><span class="text-[10px] uppercase tracking-wide font-semibold text-charcoal-light">Editorial voice</span><br/>
+                <span class="text-charcoal-dark" x-text="brief?.editorial_voice"></span></p>
+              <p><span class="text-[10px] uppercase tracking-wide font-semibold text-charcoal-light">Target audience</span><br/>
+                <span class="text-charcoal-dark" x-text="brief?.target_audience"></span></p>
+              <p x-show="brief?.key_competitors?.length"><span class="text-[10px] uppercase tracking-wide font-semibold text-charcoal-light">Key competitors</span><br/>
+                <span class="text-charcoal-dark" x-text="(brief?.key_competitors || []).join(', ')"></span></p>
+              <p class="text-[10px] text-charcoal-light pt-2 border-t border-gray-100">
+                Generated via <span x-text="brief?.generated_via"></span> — <span x-text="brief?.generated_at?.slice(0, 16)?.replace('T', ' ')"></span>
+              </p>
+            </div>
+          </div>
+        </div>
 
         {/* Selected (priority list) */}
         <div class="bg-white rounded-xl border border-gray-200 mb-6 overflow-hidden">
@@ -264,6 +324,54 @@ if (clientId) {
             alert('Save failed : ' + e.message);
           } finally {
             this.saving = false;
+          }
+        },
+      }));
+
+      window.Alpine.data('workspaceBrief', (initial, clientId) => ({
+        clientId,
+        brief: initial,
+        generating: false,
+        pollHandle: null,
+
+        async generate() {
+          if (this.generating) return;
+          this.generating = true;
+          try {
+            const res = await fetch(`/api/clients/${this.clientId}/brief/generate`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.detail || ('HTTP ' + res.status));
+            }
+            // Poll the brief endpoint until generated_at advances
+            const previousAt = this.brief?.generated_at || '';
+            const start = Date.now();
+            const poll = async () => {
+              if (Date.now() - start > 90000) {
+                this.generating = false;
+                alert('Generation taking longer than expected — check back in a moment.');
+                return;
+              }
+              try {
+                const r = await fetch(`/api/clients/${this.clientId}/brief`);
+                if (r.ok) {
+                  const data = await r.json();
+                  if (data.brief && data.brief.generated_at !== previousAt) {
+                    this.brief = data.brief;
+                    this.generating = false;
+                    return;
+                  }
+                }
+              } catch {}
+              this.pollHandle = setTimeout(poll, 2000);
+            };
+            this.pollHandle = setTimeout(poll, 3000);
+          } catch (e) {
+            this.generating = false;
+            alert('Generate failed : ' + e.message);
           }
         },
       }));

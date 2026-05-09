@@ -34,6 +34,7 @@ class Client(Base):
     name = Column(String(255), nullable=False)
     brand = Column(String(255))
     stripe_customer_id = Column(String(255))
+    apps = Column(JSONB)  # feature flags + workspace state (client_brief lives here)
     primary_brand_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True)  # see brand_resolver.py
     created_at = Column(DateTime, default=datetime.utcnow)
 
