@@ -217,14 +217,16 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
         logger.warning(f"OpenAI request threw exception for {domain}: {e}")
 
     # ── Tier 2: Gemini with grounding ───────────────────────────────────
-    if brief is None and settings.gemini_api_key:
+    from services.gemini_key_pool import get_gemini_pool
+    gemini_pool = get_gemini_pool()
+    if brief is None and gemini_pool.has_keys():
         gemini_model = settings.task_models["generate_domain_brief_gemini"]
         logger.warning(
             f"OpenAI did not produce a usable brief for {domain}, "
             f"falling back to Gemini ({gemini_model}) with grounding"
         )
         try:
-            parsed, raw, usage = _try_gemini(domain, settings.gemini_api_key, gemini_model)
+            parsed, raw, usage = _try_gemini(domain, gemini_pool.next_key(), gemini_model)
             raw_texts["gemini"] = raw
             if parsed:
                 brief = parsed

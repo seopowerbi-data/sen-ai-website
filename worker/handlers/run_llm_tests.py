@@ -11,6 +11,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from adapters.llm_scanner import create_llm_client, test_question, test_question_openai_direct
+from services.gemini_key_pool import get_gemini_pool
 
 logger = logging.getLogger(__name__)
 
@@ -49,13 +50,22 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     ).all()}
 
     # --- Build LLM clients ---
+    # For Gemini, draw the key from GeminiKeyPool (round-robin across GEMINI_API_KEYS).
+    # Single-key deployments still work: the pool falls back to GEMINI_API_KEY.
     providers = job_payload.get("providers", ["openai"])
+    gemini_pool = get_gemini_pool()
     llm_clients = {}
     for provider in providers:
-        api_key = getattr(settings, f"{provider}_api_key", "")
-        if not api_key:
-            logger.warning(f"No API key for {provider}, skipping")
-            continue
+        if provider == "gemini":
+            if not gemini_pool.has_keys():
+                logger.warning("No Gemini key in pool, skipping")
+                continue
+            api_key = gemini_pool.next_key()
+        else:
+            api_key = getattr(settings, f"{provider}_api_key", "")
+            if not api_key:
+                logger.warning(f"No API key for {provider}, skipping")
+                continue
         try:
             llm_clients[provider] = create_llm_client(provider, api_key)
         except Exception as e:
@@ -137,9 +147,9 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
                 # well within the 30K-token output budget (see brand_analyzer.py:381).
                 all_brands = all_brands[:15]
 
-                if target_brands and settings.gemini_api_key:
+                if target_brands and gemini_pool.has_keys():
                     from seo_llm.src.brand_analyzer import BrandAnalyzer
-                    gemini_client = create_llm_client("gemini", settings.gemini_api_key, model="gemini-2.5-flash-lite")
+                    gemini_client = create_llm_client("gemini", gemini_pool.next_key(), model="gemini-2.5-flash-lite")
                     from adapters.brief_injector import format_brief_context
                     brand_analyzer = BrandAnalyzer(
                         llm_client=gemini_client,
