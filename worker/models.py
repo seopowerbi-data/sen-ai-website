@@ -34,6 +34,7 @@ class Client(Base):
     name = Column(String(255), nullable=False)
     brand = Column(String(255))
     stripe_customer_id = Column(String(255))
+    primary_brand_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True)  # see brand_resolver.py
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user_links = relationship("UserClient", back_populates="client")
@@ -137,6 +138,7 @@ class Scan(Base):
         # → assigning_keywords → brands_ready → generating_personas → personas_ready
         # → scanning → completed | failed
     focus_brand_id = Column(UUID(as_uuid=True), ForeignKey("client_brands.id", ondelete="SET NULL"))
+    promotion_brand_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True)  # per-scan override of client.primary_brand_ids
     parent_scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.id", ondelete="SET NULL"))
     schedule = Column(String(20), default="manual")  # manual | weekly | monthly
     next_run_at = Column(DateTime)
@@ -313,6 +315,9 @@ class ScanContentItem(Base):
     # Netlinking specific
     estimated_price = Column(Float)
     platform_link = Column(String(500))
+
+    # Audit trail: brands instructed to be promoted at generation time
+    promoted_brand_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True)
 
     # Workflow
     status = Column(String(30), default="identified")

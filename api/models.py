@@ -36,6 +36,10 @@ class Client(Base):
     brand = Column(String(255))
     stripe_customer_id = Column(String(255))
     apps = Column(JSONB, nullable=False, default={"ai_scan": {"enabled": True}})
+    # primary_brand_ids: ordered list of ClientBrand IDs, first = lead brand.
+    # Cross-scan persistent default for content promotion (FAQ / Article generation).
+    # See migration 019 + worker/services/brand_resolver.py for resolution chain.
+    primary_brand_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user_links = relationship("UserClient", back_populates="client")
@@ -177,6 +181,10 @@ class Scan(Base):
         # → assigning_keywords → brands_ready → generating_personas → personas_ready
         # → scanning → completed | failed
     focus_brand_id = Column(UUID(as_uuid=True), ForeignKey("client_brands.id", ondelete="SET NULL"))
+    # Per-scan promotion override (NULL = inherit from client.primary_brand_ids).
+    # Lets the user say "on this scan promote ONLY Avène" even if their workspace
+    # default is [Avène, Aderma, Ducray]. See worker/services/brand_resolver.py.
+    promotion_brand_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True)
     parent_scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.id", ondelete="SET NULL"))
     schedule = Column(String(20), default="manual")  # manual | weekly | monthly
     next_run_at = Column(DateTime)
@@ -353,6 +361,11 @@ class ScanContentItem(Base):
     # Netlinking specific
     estimated_price = Column(Float)
     platform_link = Column(String(500))
+
+    # Audit trail: which brands were instructed to be promoted at generation time.
+    # Resolved by worker/services/brand_resolver.py from scan.promotion_brand_ids
+    # OR ScanBrandClassification(my_brand) OR client.primary_brand_ids.
+    promoted_brand_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True)
 
     # Workflow
     status = Column(String(30), default="identified")
