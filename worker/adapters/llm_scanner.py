@@ -114,12 +114,14 @@ def test_question(question: str, persona: dict, llm_client: LLMClient,
     # 3. Brand mention analysis (seo-llm BrandAnalyzer)
     brand_mentions = []
     brand_analysis = {}
+    brand_analyzer_usage: dict = {}
     if brand_analyzer:
         try:
             brand_result = brand_analyzer.analyze_response(response["text"], question)
             if brand_result:
                 brand_mentions = brand_result.get("brand_mentions", [])
                 brand_analysis = brand_result.get("brand_analyse", {})
+                brand_analyzer_usage = brand_result.get("llm_usage") or {}
         except Exception as e:
             logger.warning(f"BrandAnalyzer failed: {e}")
 
@@ -134,6 +136,8 @@ def test_question(question: str, persona: dict, llm_client: LLMClient,
         "competitor_domains": competitor_domains,
         "brand_mentions": brand_mentions,
         "brand_analysis": brand_analysis,
+        "brand_analyzer_usage": brand_analyzer_usage,
+        "brand_analyzer_model": getattr(getattr(brand_analyzer, "llm", None), "model", None) if brand_analyzer else None,
         "duration_ms": duration_ms,
         "input_tokens": response.get("usage", {}).get("prompt_tokens", 0),
         "output_tokens": response.get("usage", {}).get("completion_tokens", 0),
@@ -213,12 +217,14 @@ def test_question_openai_direct(question: str, persona: dict, target_domain: str
 
     brand_mentions = []
     brand_analysis = {}
+    brand_analyzer_usage: dict = {}
     if brand_analyzer:
         try:
             brand_result = brand_analyzer.analyze_response(response_text, question)
             if brand_result:
                 brand_mentions = brand_result.get("brand_mentions", [])
                 brand_analysis = brand_result.get("brand_analyse", {})
+                brand_analyzer_usage = brand_result.get("llm_usage") or {}
         except Exception as e:
             logger.warning(f"BrandAnalyzer failed: {e}")
 
@@ -236,6 +242,8 @@ def test_question_openai_direct(question: str, persona: dict, target_domain: str
         "competitor_domains": competitor_domains,
         "brand_mentions": brand_mentions,
         "brand_analysis": brand_analysis,
+        "brand_analyzer_usage": brand_analyzer_usage,
+        "brand_analyzer_model": getattr(getattr(brand_analyzer, "llm", None), "model", None) if brand_analyzer else None,
         "duration_ms": duration_ms,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,

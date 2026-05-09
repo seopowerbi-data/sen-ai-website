@@ -65,10 +65,11 @@ async def classify_brands(domain: str, site_brand: str,
         anthropic_api_key: Claude API key
 
     Returns:
-        list of {original, name, category, parent}
+        dict {brands: list of {original, name, category, parent}, model, input_tokens, output_tokens, duration_ms}
     """
     if not unclassified:
-        return []
+        return {"brands": [], "model": settings.task_models["cleanup_brands"],
+                "input_tokens": 0, "output_tokens": 0, "duration_ms": 0}
 
     existing_str = "\n".join(f"- {b['name']} ({b['category']})" for b in existing[:20])
     brand_list = "\n".join(f"- {name}" for name in unclassified)
@@ -121,4 +122,11 @@ async def classify_brands(domain: str, site_brand: str,
     logger.info(f"Brand cleanup: {len(unclassified)} → {len([b for b in brands if b.get('category') != 'ignore'])} brands, "
                 f"{len([b for b in brands if b.get('category') == 'ignore'])} ignored, {duration}ms")
 
-    return brands
+    usage = data.get("usage", {})
+    return {
+        "brands": brands,
+        "model": model,
+        "input_tokens": usage.get("input_tokens", 0),
+        "output_tokens": usage.get("output_tokens", 0),
+        "duration_ms": duration,
+    }

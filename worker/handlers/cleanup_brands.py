@@ -95,7 +95,7 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
 
     # 4. Call Claude to classify (with domain brief context if available)
     from adapters.brief_injector import format_brief_context
-    result = asyncio.run(
+    classify_result = asyncio.run(
         classify_brands(
             domain=scan.domain,
             site_brand=site_brand_name,
@@ -104,6 +104,18 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
             anthropic_api_key=settings.anthropic_api_key,
             domain_context=format_brief_context(scan.config),
         )
+    )
+    result = classify_result["brands"]
+
+    from adapters.llm_logger import log_llm_usage
+    log_llm_usage(
+        db, provider="anthropic",
+        model=classify_result.get("model", "unknown"),
+        operation="cleanup_brands",
+        input_tokens=classify_result.get("input_tokens", 0),
+        output_tokens=classify_result.get("output_tokens", 0),
+        duration_ms=classify_result.get("duration_ms"),
+        scan_id=scan_id, client_id=str(scan.client_id),
     )
 
     # 5 + 6 + 7 + 8 + 9. Apply classifications to SBC rows

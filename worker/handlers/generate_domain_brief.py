@@ -116,8 +116,8 @@ def _extract_json(text: str) -> dict | None:
     return None
 
 
-def _try_openai(domain: str, api_key: str, model: str) -> tuple[dict | None, str]:
-    """Primary: OpenAI Responses API + web_search. Returns (parsed_or_None, raw_text)."""
+def _try_openai(domain: str, api_key: str, model: str) -> tuple[dict | None, str, dict]:
+    """Primary: OpenAI Responses API + web_search. Returns (parsed_or_None, raw_text, usage)."""
     client = openai.OpenAI(api_key=api_key, timeout=60)
     prompt = WEB_BRIEF_PROMPT.format(domain=domain)
     response = client.responses.create(
@@ -127,7 +127,12 @@ def _try_openai(domain: str, api_key: str, model: str) -> tuple[dict | None, str
         temperature=0.3,
     )
     text = response.output_text or ""
-    return _extract_json(text), text
+    usage_obj = getattr(response, "usage", None)
+    usage = {
+        "input_tokens": getattr(usage_obj, "input_tokens", 0) or 0,
+        "output_tokens": getattr(usage_obj, "output_tokens", 0) or 0,
+    }
+    return _extract_json(text), text, usage
 
 
 def _try_gemini(domain: str, api_key: str, model: str) -> tuple[dict | None, str, dict]:
@@ -203,11 +208,19 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     primary_model = settings.task_models["generate_domain_brief"]
     logger.info(f"Generating brief for {domain} via OpenAI ({primary_model}) + web_search")
     try:
-        parsed, raw = _try_openai(domain, settings.openai_api_key, primary_model)
+        parsed, raw, usage = _try_openai(domain, settings.openai_api_key, primary_model)
         raw_texts["openai"] = raw
         if parsed:
             brief = parsed
             used_provider = "openai"
+            from adapters.llm_logger import log_llm_usage
+            log_llm_usage(
+                db, provider="openai", model=primary_model,
+                operation="generate_domain_brief",
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+                scan_id=scan_id, client_id=str(scan.client_id),
+            )
         else:
             logger.warning(
                 f"OpenAI returned malformed JSON for {domain} ({len(raw)} chars). "

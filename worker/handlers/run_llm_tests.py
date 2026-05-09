@@ -316,6 +316,24 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
                     scan_id=scan_id, client_id=str(scan.client_id),
                 )
 
+                # BrandAnalyzer is a separate Gemini call per test — log it
+                # under its own operation/model so cost dashboards split scan_test
+                # (search-grounded gpt-4.1-mini / gemini-2.5-flash) from
+                # brand_analyzer (gemini-2.5-flash-lite parsing the response).
+                ba_usage = result.get("brand_analyzer_usage") or {}
+                ba_model = result.get("brand_analyzer_model")
+                if ba_model and (ba_usage.get("input_tokens") or ba_usage.get("output_tokens")
+                                 or ba_usage.get("prompt_tokens") or ba_usage.get("completion_tokens")):
+                    log_llm_usage(
+                        db, provider="gemini", model=ba_model,
+                        operation="brand_analyzer",
+                        input_tokens=ba_usage.get("input_tokens", 0)
+                                     or ba_usage.get("prompt_tokens", 0),
+                        output_tokens=ba_usage.get("output_tokens", 0)
+                                      or ba_usage.get("completion_tokens", 0),
+                        scan_id=scan_id, client_id=str(scan.client_id),
+                    )
+
             except Exception as e:
                 logger.error(f"Test failed ({provider}): {e}")
                 errors += 1
