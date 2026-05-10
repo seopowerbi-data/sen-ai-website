@@ -11,6 +11,8 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from adapters.llm_scanner import create_llm_client, test_question, test_question_openai_direct
+from services.circuit_breaker import ProviderCircuitBreaker
+from services.credits import partial_refund_scan_credits
 from services.gemini_key_pool import get_gemini_pool
 
 logger = logging.getLogger(__name__)
@@ -201,6 +203,12 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     scan_country = (scan.config or {}).get("domain_brief", {}).get("country") or "FR"
     openai_model = settings.task_models.get("scan_test_openai", "gpt-4.1-mini")
 
+    # Per-scan circuit breaker. Trips a provider when its failure rate exceeds
+    # threshold (default 80%) AND we have at least min_sample tests recorded
+    # (default 10). Pending futures for a tripped provider are cancelled inline
+    # so we don't waste API quota / wait time on a provider known to be down.
+    breaker = ProviderCircuitBreaker(list(llm_clients.keys()))
+
     # Single ThreadPoolExecutor over ALL tasks — no batching = no head-of-line blocking
     # (a slow OpenAI call no longer holds back Gemini results in the same batch).
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -236,6 +244,14 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
         # or OpenAI in 30s), we persist + update progress immediately.
         for future in as_completed(futures):
             question, persona, provider = futures[future]
+
+            # Circuit breaker may have cancelled pending futures for a tripped
+            # provider. Count them as skipped (no DB write, no usage logging,
+            # no API call ever made) and move on.
+            if future.cancelled():
+                completed += 1
+                continue
+
             try:
                 result = future.result()
 
@@ -303,6 +319,7 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
                         ))
 
                 completed += 1
+                breaker.record_success(provider)
                 logger.info(f"Test {completed}/{total_tests}: {provider} | "
                            f"cited={result['target_cited']} | "
                            f"brand={result.get('brand_analysis', {}).get('marque_cible_mentionnee', False)} | "
@@ -342,6 +359,16 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
                 logger.error(f"Test failed ({provider}): {e}")
                 errors += 1
                 completed += 1
+                breaker.record_failure(provider)
+
+            # Circuit breaker check: if THIS provider just crossed the
+            # failure threshold, cancel its still-pending futures so we
+            # don't keep burning quota / time on a known-down provider.
+            if breaker.maybe_trip(provider):
+                for f, (q_, p_, prov_) in list(futures.items()):
+                    if prov_ == provider and not f.done():
+                        if f.cancel():
+                            breaker.record_skip(provider)
 
             # Per-test progress update (Goal-Gradient): user sees 1/N, 2/N, 3/N...
             # in real time. Cheap commits (one row per LLM call which costs orders
@@ -354,6 +381,37 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     success = max(completed - errors, 1)
     citation_rate = round(target_cited_count / success * 100, 1)
     brand_rate = round(brand_mentioned_count / success * 100, 1)
+
+    # Prorata refund (C.3): a question is "delivered" if at least ONE provider
+    # produced a result for it. Questions where every provider failed/skipped
+    # count as undelivered → refund 1 scan_credit each. Credits are debited
+    # per-question at launch (not per-test), so the refund unit is per-question.
+    questions_with_results = {
+        str(qid) for (qid,) in db.query(ScanLLMResult.question_id)
+            .filter(ScanLLMResult.scan_id == scan_id).distinct()
+    }
+    failed_question_count = sum(
+        1 for q in questions if str(q.id) not in questions_with_results
+    )
+    refund_info = None
+    if failed_question_count > 0:
+        try:
+            partial_refund_scan_credits(
+                db=db,
+                client_id=scan.client_id,
+                scan_id=scan_id,
+                amount=failed_question_count,
+                description=f"Partial refund: {failed_question_count} questions undelivered",
+            )
+            refund_info = {
+                "amount": failed_question_count,
+                "reason": "questions_undelivered",
+            }
+        except Exception:
+            logger.exception(
+                f"Partial refund failed for scan {scan_id} "
+                f"({failed_question_count} questions)"
+            )
 
     scan.status = "completed"
     scan.progress_pct = 100
@@ -371,6 +429,8 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
         "target_domain": target_domain,
         "target_brands": target_brands if brand_analyzer else [],
         "focus_brand_id": str(scan.focus_brand_id) if scan.focus_brand_id else None,
+        "provider_status": breaker.to_dict(),
+        "refund_info": refund_info,
     }
 
     # Chain: generate opportunities + editorial + cleanup brands

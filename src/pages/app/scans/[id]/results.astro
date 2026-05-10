@@ -172,6 +172,15 @@ const topicChartColors = topics.map(t => t.rate >= 30 ? '#10b981' : t.rate > 0 ?
 const mentionedCount = o?.target_cited ?? 0;
 const notMentionedCount = (o?.total_tests ?? 0) - mentionedCount;
 
+// Provider status + refund banner (C.2/C.3) — surface mid-scan provider failures
+// and any partial refunds issued. providerStatus is keyed by provider name with
+// {success, failure, skipped, tripped} per provider.
+const providerStatus: any = o?.provider_status || null;
+const refundInfo: any = o?.refund_info || null;
+const trippedProviders: string[] = providerStatus
+  ? Object.entries(providerStatus).filter(([_, s]: any) => s.tripped).map(([p]) => p)
+  : [];
+
 // Position distribution (C.1) — bucketed rank of focus brand among brands cited
 const posDist: any = o?.position_distribution || null;
 const posDistDelta: any = o?.position_distribution_delta || {};
@@ -188,6 +197,28 @@ const posBuckets = [
 
   {o ? (
     <>
+      {/* ═══════ CIRCUIT BREAKER NOTICE (only on degraded runs) ═══════ */}
+      {(trippedProviders.length > 0 || refundInfo) && (
+        <div class="bg-amber-50 border-l-4 border-amber-400 rounded-r-lg p-4 mb-6">
+          <div class="flex items-start gap-3">
+            <svg class="w-5 h-5 text-amber-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+            </svg>
+            <div class="flex-1 text-sm">
+              <p class="font-medium text-amber-800">Partial scan completion</p>
+              <p class="text-amber-700 text-xs mt-1">
+                {trippedProviders.length > 0 && (
+                  <span>Provider{trippedProviders.length > 1 ? 's' : ''} <span class="font-semibold">{trippedProviders.join(', ')}</span> failed mid-scan and were stopped.</span>
+                )}
+                {refundInfo && (
+                  <span>{trippedProviders.length > 0 ? ' ' : ''}{refundInfo.amount} scan credit{refundInfo.amount > 1 ? 's' : ''} refunded for undelivered questions.</span>
+                )}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ═══════ TREND KPIs (4 cards) ═══════ */}
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         <div class="bg-white rounded-xl shadow-sm p-6 hover:shadow-md transition-shadow">
