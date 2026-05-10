@@ -28,7 +28,9 @@ time so refund-on-failure works end-to-end.
 
 import json
 import logging
+import sys
 import time
+import types
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -37,6 +39,53 @@ from sqlalchemy.orm.attributes import flag_modified
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# ─── geo_content_generator stub ────────────────────────────────────────
+# faq_content_generator.py:26 does `from .geo_content_generator import BRAND_MAP`.
+# Loading the real geo_content_generator pulls Pillow / PyMuPDF / PyGithub /
+# playwright / readability-lxml / etc. — 200+ MB of deps we don't need at
+# runtime here. We inject a minimal stub module providing just BRAND_MAP so
+# the FAQ generator's import resolves without the heavy chain.
+#
+# When Phase B brand bias lands, the BrandResolver hook will read primary
+# brands from the DB rather than this static map. Until then this map gives
+# Pierre Fabre brands their proper "name" lookup from "site" (used by
+# faq_content_generator._generate_faq line 547).
+_BRAND_MAP_STUB = {
+    "ave": {"name": "Avène (Eau Thermale Avène)", "site": "www.eau-thermale-avene.fr", "category": "dermo-cosmétique", "is_own": True},
+    "duc": {"name": "Ducray", "site": "www.ducray.com", "category": "dermo-cosmétique", "is_own": True},
+    "ade": {"name": "A-Derma", "site": "www.aderma.fr", "category": "dermo-cosmétique", "is_own": True},
+    "klo": {"name": "Klorane", "site": "www.klorane.com", "category": "soin capillaire et végétal", "is_own": True},
+    "rft": {"name": "René Furterer", "site": "www.renefurterer.com", "category": "soin capillaire", "is_own": True},
+    "elg": {"name": "Elgydium", "site": "www.pierrefabre-oralcare.com", "category": "soin bucco-dentaire", "is_own": True},
+    "elu": {"name": "Eluday", "site": "www.pierrefabre-oralcare.com", "category": "soin bucco-dentaire", "is_own": True},
+    "art": {"name": "Arthrodont", "site": "www.pierrefabre-oralcare.com", "category": "soin bucco-dentaire", "is_own": True},
+    "ina": {"name": "Inava", "site": "www.pierrefabre-oralcare.com", "category": "soin bucco-dentaire", "is_own": True},
+    "vic": {"name": "Vichy", "site": "www.vichy.fr", "category": "dermo-cosmétique", "is_own": False},
+    "lrp": {"name": "La Roche-Posay", "site": "www.laroche-posay.fr", "category": "dermo-cosmétique", "is_own": False},
+    "bio": {"name": "Bioderma", "site": "www.bioderma.fr", "category": "dermo-cosmétique", "is_own": False},
+    "uri": {"name": "Uriage", "site": "www.uriage.com", "category": "dermo-cosmétique", "is_own": False},
+    "mus": {"name": "Mustela", "site": "www.mustela.fr", "category": "dermo-cosmétique", "is_own": False},
+    "cer": {"name": "CeraVe", "site": "www.cerave.fr", "category": "dermo-cosmétique", "is_own": False},
+    "euc": {"name": "Eucerin", "site": "www.eucerin.fr", "category": "dermo-cosmétique", "is_own": False},
+    "nux": {"name": "Nuxe", "site": "fr.nuxe.com", "category": "dermo-cosmétique", "is_own": False},
+}
+
+
+def _install_geo_stub() -> None:
+    """Inject a minimal geo_content_generator stub into sys.modules.
+
+    Idempotent — safe to call multiple times. Must run BEFORE any code
+    triggers `from seo_llm.src.faq_content_generator import ...`.
+    """
+    mod_name = "seo_llm.src.geo_content_generator"
+    if mod_name in sys.modules and getattr(sys.modules[mod_name], "_is_stub", False):
+        return
+    stub = types.ModuleType(mod_name)
+    stub.BRAND_MAP = _BRAND_MAP_STUB
+    stub._is_stub = True
+    sys.modules[mod_name] = stub
 
 
 def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
@@ -70,6 +119,10 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
     # Mark as generating so the UI can show a spinner state if it polls
     item.status = "generating"
     db.commit()
+
+    # Install the geo_content_generator stub BEFORE importing FAQContentGenerator
+    # (the latter does `from .geo_content_generator import BRAND_MAP` at module load).
+    _install_geo_stub()
 
     # Lazy import to avoid loading the heavy seo_llm module at worker boot
     from seo_llm.src.faq_content_generator import FAQContentGenerator
