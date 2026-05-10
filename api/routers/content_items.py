@@ -27,13 +27,20 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session, joinedload
 
 from models import (
-    ClientBrand, Scan, ScanContentItem, UserClient, get_db,
+    ClientBrand, Job, Scan, ScanContentItem, UserClient, get_db,
 )
 from routers.scans import _check_scan_access
 from services.audit import audit_log
 from services.auth_service import get_current_user
 
 router = APIRouter()
+
+
+# ── Handler dispatch by content_type ──────────────────────────────────
+GENERATOR_BY_CONTENT_TYPE = {
+    "faq": "generate_faq",
+    # "netlinking_article": "generate_article" — Phase C
+}
 
 
 # ── Status → Kanban column mapping ──────────────────────────────────────
@@ -306,3 +313,91 @@ async def update_content_item(item_id: str, patch: ContentItemPatch,
         db,
     )
     return _serialize_item(item, brand_names)
+
+
+@router.post("/content-items/{item_id}/generate")
+async def generate_content(item_id: str, user=Depends(get_current_user),
+                           db: Session = Depends(get_db)):
+    """Enqueue a content generation job for this item.
+
+    Dispatches to the right worker handler by content_type (faq → generate_faq,
+    article → generate_article in Phase C). Dedupes : if a generate job is
+    already in flight for this item, returns the existing job_id rather than
+    enqueueing a duplicate.
+
+    Status transitions: identified → generating (set by handler) → draft (on
+    success) or back to identified (on failure, allowing retry from Kanban).
+
+    NOTE: credit debit not yet wired here. Phase B pricing = 1 content_credit
+    per FAQ — to be added in a follow-up commit alongside the Stripe content
+    credits flow.
+    """
+    item = (
+        db.query(ScanContentItem)
+        .options(joinedload(ScanContentItem.scan))
+        .filter(ScanContentItem.id == item_id)
+        .first()
+    )
+    if not item:
+        raise HTTPException(404, "Content item not found")
+
+    _check_scan_access(str(item.scan_id), user, db)
+
+    handler = GENERATOR_BY_CONTENT_TYPE.get(item.content_type)
+    if not handler:
+        raise HTTPException(400, {
+            "error": "unsupported_content_type",
+            "message": f"No generator wired for content_type='{item.content_type}' yet. "
+                       f"Supported: {list(GENERATOR_BY_CONTENT_TYPE.keys())}",
+        })
+
+    if item.status not in ("identified", "draft"):
+        raise HTTPException(409, {
+            "error": "invalid_status",
+            "message": f"Item is in status '{item.status}' — can only (re)generate from "
+                       f"'identified' or 'draft'. Use the validation page to manage "
+                       f"approved/published items.",
+        })
+
+    if not item.target_url:
+        raise HTTPException(400, {
+            "error": "missing_target_url",
+            "message": "FAQ generation requires a target_url to scrape. This item has none.",
+        })
+
+    # Dedupe in-flight job (don't double-enqueue if user clicks twice)
+    in_flight = (
+        db.query(Job)
+        .filter(
+            Job.scan_id == item.scan_id,
+            Job.job_type == handler,
+            Job.status.in_(["pending", "running"]),
+        )
+        .all()
+    )
+    for j in in_flight:
+        if (j.payload or {}).get("item_id") == item_id:
+            return {
+                "ok": True, "job_id": str(j.id), "status": j.status,
+                "message": "Generation already in flight",
+            }
+
+    job = Job(
+        scan_id=item.scan_id,
+        job_type=handler,
+        status="pending",
+        payload={"item_id": item_id},
+        max_attempts=2,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    audit_log(
+        db, user_id=str(user.id),
+        action="content_item.generate",
+        target_type="content_item", target_id=item_id,
+        details={"handler": handler, "job_id": str(job.id)},
+    )
+
+    return {"ok": True, "job_id": str(job.id), "status": "pending"}

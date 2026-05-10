@@ -262,19 +262,28 @@ function ageLabel(iso: string | null): string {
 
                       <!-- Per-status footer -->
                       {isToCreate && (
-                        <div class="mt-2 pt-2 border-t border-gray-100 flex items-center justify-between gap-2">
+                        <div class="mt-2 pt-2 border-t border-gray-100 flex items-center justify-between gap-2"
+                             x-data={`{ generating: ${item.status === 'generating'}, error: '' }`}>
                           {item.opportunity_score != null && (
                             <span class="text-[10px] text-charcoal-light">Score <strong class="text-charcoal-dark">{Math.round(item.opportunity_score)}</strong></span>
                           )}
-                          <div x-data="{ open: false }" class="relative">
-                            <button @click="open = !open"
-                                    title="Generate content for this opportunity (Phase B/C)"
+                          {item.content_type === 'faq' ? (
+                            <button @click={`generating = true; error = ''; fetch('/api/content-items/${item.id}/generate', {method:'POST'}).then(async r => { if (r.ok) { /* poll for completion */ const poll = async () => { const pr = await fetch('/api/content-items/${item.id}'); if (pr.ok) { const d = await pr.json(); if (d.status !== 'identified' && d.status !== 'generating') { window.location.reload(); return; } } setTimeout(poll, 3000); }; setTimeout(poll, 3000); } else { const j = await r.json().catch(()=>({})); error = j.detail?.message || j.detail || 'Failed'; generating = false; } }).catch(e => { error = e.message; generating = false; });`}
+                                    :disabled="generating"
+                                    :class="generating ? 'bg-coral/40 text-white cursor-wait' : 'bg-coral text-white hover:bg-coral-dark'"
+                                    class="text-[10px] rounded px-2 py-1 font-medium transition-all"
+                                    title="Generate FAQ content (~60s)">
+                              <span x-show="!generating">⚡ Generate FAQ</span>
+                              <span x-show="generating">⏳ Generating…</span>
+                            </button>
+                          ) : (
+                            <button title="Article generation — coming in Phase C"
                                     disabled
                                     class="text-[10px] bg-gray-200 text-gray-400 cursor-not-allowed rounded px-2 py-1 font-medium">
-                              Generate ▾
+                              ⚡ Generate (Phase C)
                             </button>
-                            <!-- Phase B/C will populate this dropdown with FAQ + Article -->
-                          </div>
+                          )}
+                          <p x-show="error" x-text="error" class="text-[9px] text-red-600 absolute mt-8"></p>
                         </div>
                       )}
 
