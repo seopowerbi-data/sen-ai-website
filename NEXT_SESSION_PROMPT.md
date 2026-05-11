@@ -39,9 +39,9 @@ Tu me proposes l'archi de chaque option avec trade-offs concrets, puis on choisi
 
 ## État branche
 
-`master` à `e75b72e`, propre côté commits poussés.
+`master` à `3fdebfb`, working tree propre (à part contenu untracked *dans* le submodule `worker/seo_llm`, sans impact repo parent).
 
-**16 fichiers modifiés non-commités** datent du chantier audit-gratuit + homepage refresh + register fermé d'il y a plusieurs sessions. Déjà déployés en prod mais jamais commités. À ranger en un chunk séparé quand l'humeur — décrits dans tracker précédent. Pas un blocker.
+Le chantier "16 fichiers non-commités" (audit-gratuit + homepage refresh + register fermé) a été rangé en 4 commits le 2026-05-11 : `8aca51c` chore gitignore/untrack, `0323976` registration kill-switch, `6e32a60` landing refresh, `3fdebfb` fix copy audit.
 
 ## Prod state
 
@@ -62,7 +62,6 @@ Tu me proposes l'archi de chaque option avec trade-offs concrets, puis on choisi
 | Tip.astro tooltips vertical-neutres | ~20min | 🟢 polish |
 | APScheduler infra (Phase D dep) | ~0.5j | 🟢 |
 | Site type classifier `classify_citation_domains.py` | ~1j | 🟢 (Phase C extension) |
-| Cleanup 16 fichiers non-commités | ~20min | 🟢 git hygiene |
 
 ## ⚠️ Pièges à connaître
 
