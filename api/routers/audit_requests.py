@@ -87,7 +87,7 @@ def _send_confirmation_email(email: str, first_name: str | None, website: str, t
                 f"Une fois confirmée, on revient vers vous sous 24h avec :</p>"
                 f"<ul>"
                 f"<li>3 personas réalistes de vos clients sur ce sujet</li>"
-                f"<li>6 questions clés posées à ChatGPT, Gemini et Perplexity</li>"
+                f"<li>6 questions clés posées à ChatGPT et Gemini</li>"
                 f"<li>Un mini-rapport actionable avec ce que dit l'IA de votre marque</li>"
                 f"</ul>"
                 f'<p><a href="{confirm_url}" style="display:inline-block;padding:12px 24px;'
