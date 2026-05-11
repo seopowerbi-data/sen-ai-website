@@ -100,11 +100,11 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
 
     for opp in opps:
         question = db.query(ScanQuestion).filter(ScanQuestion.id == opp.question_id).first()
-        if not question or not (question.text or "").strip():
+        if not question or not (question.question or "").strip():
             logger.debug(f"materialize: skip opp {opp.id} — no question text")
             continue
 
-        q_key = question.text.strip().lower()
+        q_key = question.question.strip().lower()
         if q_key in existing_questions:
             skipped += 1
             continue
@@ -116,7 +116,7 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
             persona_name=opp.persona_name,
             target_url=None,
             target_url_source="pending_user",
-            target_question=question.text.strip(),
+            target_question=question.question.strip(),
             priority=opp.priority,
             opportunity_score=opp.opportunity_score,
             brand_position=opp.brand_position,
