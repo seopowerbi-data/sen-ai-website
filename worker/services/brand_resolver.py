@@ -207,3 +207,44 @@ def resolve_promotion(scan, db: Session) -> PromotionResolution:
         resolved_via=resolved_via,
         promote_brand_ids=[b.id for b in promote_brands],
     )
+
+
+def is_competitor_scan(scan, db: Session) -> bool:
+    """Return True when the scanned domain does not belong to any of the
+    client's promoted brands — i.e. we're scanning a competitor.
+
+    Used by `materialize_content_items` to decide whether `target_url` should
+    be auto-filled from the scan (user-owned domain → yes) or left NULL for
+    the user to pick a page on their own site (competitor → A2 manual pick).
+
+    Returns False (the conservative default) on any resolution failure so we
+    don't accidentally block a legitimate user-owned scan from auto-filling.
+    """
+    if not scan or not scan.domain:
+        return False
+    try:
+        resolution = resolve_promotion(scan, db)
+    except PromotionUnsetError:
+        # No brand resolves at all → we don't know what's user vs competitor.
+        # Treat as user-owned (status quo behavior, conservative).
+        return False
+
+    scan_domain_lc = scan.domain.lower().strip()
+    if scan_domain_lc.startswith("www."):
+        scan_domain_lc = scan_domain_lc[4:]
+
+    for b in resolution.promote_brands:
+        if not b.domain:
+            continue
+        b_domain_lc = b.domain.lower().strip()
+        if b_domain_lc.startswith("www."):
+            b_domain_lc = b_domain_lc[4:]
+        # Match either direction so subdomain scans (eu.avene.com vs avene.com)
+        # are still treated as user-owned.
+        if scan_domain_lc == b_domain_lc:
+            return False
+        if scan_domain_lc.endswith("." + b_domain_lc):
+            return False
+        if b_domain_lc.endswith("." + scan_domain_lc):
+            return False
+    return True

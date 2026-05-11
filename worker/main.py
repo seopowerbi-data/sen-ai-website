@@ -81,7 +81,7 @@ def load_handlers():
                           run_llm_tests, generate_editorial,
                           detect_competitors, generate_opportunities, cleanup_brands,
                           generate_domain_brief, generate_client_brief,
-                          generate_faq)  # noqa: F401
+                          generate_faq, materialize_content_items)  # noqa: F401
     HANDLERS["fetch_keywords"] = fetch_keywords.execute
     HANDLERS["classify_topics"] = classify_topics.execute
     HANDLERS["assign_keywords"] = assign_keywords.execute
@@ -95,6 +95,7 @@ def load_handlers():
     HANDLERS["generate_domain_brief"] = generate_domain_brief.execute
     HANDLERS["generate_client_brief"] = generate_client_brief.execute
     HANDLERS["generate_faq"] = generate_faq.execute
+    HANDLERS["materialize_content_items"] = materialize_content_items.execute
 
 
 def _refund_scan_credits(scan_id, db: Session) -> None:

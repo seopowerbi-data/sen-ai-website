@@ -239,6 +239,12 @@ function ageLabel(iso: string | null): string {
                             {typeLabel(item.content_type)}
                           </span>
                         )}
+                        {col.key === 'to_create' && !item.target_url && (
+                          <span class="text-[9px] font-bold rounded px-1.5 py-0.5 bg-amber-100 text-amber-800"
+                                title="Pick a URL on your site where this FAQ should live, then click Generate.">
+                            ⚠ NEEDS URL
+                          </span>
+                        )}
                         {item.scan_domain && (
                           <span class="text-[10px] text-charcoal-light truncate max-w-[140px]" title={item.scan_domain}>
                             {item.scan_domain}
@@ -268,14 +274,22 @@ function ageLabel(iso: string | null): string {
                             <span class="text-[10px] text-charcoal-light">Score <strong class="text-charcoal-dark">{Math.round(item.opportunity_score)}</strong></span>
                           )}
                           {item.content_type === 'faq' ? (
-                            <button @click={`generating = true; error = ''; fetch('/api/content-items/${item.id}/generate', {method:'POST'}).then(async r => { if (r.ok) { /* poll for completion */ const poll = async () => { const pr = await fetch('/api/content-items/${item.id}'); if (pr.ok) { const d = await pr.json(); if (d.status !== 'identified' && d.status !== 'generating') { window.location.reload(); return; } } setTimeout(poll, 3000); }; setTimeout(poll, 3000); } else { const j = await r.json().catch(()=>({})); error = j.detail?.message || j.detail || 'Failed'; generating = false; } }).catch(e => { error = e.message; generating = false; });`}
-                                    :disabled="generating"
-                                    :class="generating ? 'bg-coral/40 text-white cursor-wait' : 'bg-coral text-white hover:bg-coral-dark'"
-                                    class="text-[10px] rounded px-2 py-1 font-medium transition-all"
-                                    title="Generate FAQ content (~60s)">
-                              <span x-show="!generating">⚡ Generate FAQ</span>
-                              <span x-show="generating">⏳ Generating…</span>
-                            </button>
+                            item.target_url ? (
+                              <button @click={`generating = true; error = ''; fetch('/api/content-items/${item.id}/generate', {method:'POST'}).then(async r => { if (r.ok) { /* poll for completion */ const poll = async () => { const pr = await fetch('/api/content-items/${item.id}'); if (pr.ok) { const d = await pr.json(); if (d.status !== 'identified' && d.status !== 'generating') { window.location.reload(); return; } } setTimeout(poll, 3000); }; setTimeout(poll, 3000); } else { const j = await r.json().catch(()=>({})); error = j.detail?.message || j.detail || 'Failed'; generating = false; } }).catch(e => { error = e.message; generating = false; });`}
+                                      :disabled="generating"
+                                      :class="generating ? 'bg-coral/40 text-white cursor-wait' : 'bg-coral text-white hover:bg-coral-dark'"
+                                      class="text-[10px] rounded px-2 py-1 font-medium transition-all"
+                                      title="Generate FAQ content (~60s)">
+                                <span x-show="!generating">⚡ Generate FAQ</span>
+                                <span x-show="generating">⏳ Generating…</span>
+                              </button>
+                            ) : (
+                              <a href={`/app/content/${item.id}`}
+                                 class="text-[10px] rounded px-2 py-1 font-medium bg-amber-100 text-amber-800 hover:bg-amber-200 transition-all"
+                                 title="Set a target URL on the validation page, then Generate.">
+                                Set URL →
+                              </a>
+                            )
                           ) : (
                             <button title="Article generation — coming in Phase C"
                                     disabled

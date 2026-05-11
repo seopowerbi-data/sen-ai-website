@@ -87,6 +87,7 @@ def _serialize_item(item: ScanContentItem, brand_names: dict[str, str] | None = 
         "topic_name": item.topic_name,
         "persona_name": item.persona_name,
         "target_url": item.target_url,
+        "target_url_source": item.target_url_source,
         "target_page_title": item.target_page_title,
         "target_question": item.target_question,
         "content_html": item.content_html,
@@ -223,6 +224,7 @@ class ContentItemPatch(BaseModel):
     content_html: str | None = None
     content_text: str | None = None
     published_url: str | None = None
+    target_url: str | None = None
 
 
 VALID_STATUSES = {
@@ -297,6 +299,22 @@ async def update_content_item(item_id: str, patch: ContentItemPatch,
             if not item.published_at:
                 item.published_at = datetime.utcnow()
 
+    if patch.target_url is not None:
+        # Normalize: empty string from the input becomes NULL (clearing the field)
+        normalized = patch.target_url.strip() or None
+        if normalized != item.target_url:
+            changes["target_url"] = {"old": item.target_url, "new": normalized}
+            item.target_url = normalized
+            # A user-driven edit always flips the source to 'user_input' — this
+            # is the audit signal that distinguishes manual picks from future
+            # auto-suggestions (Phase D Pilier 3).
+            if normalized:
+                changes["target_url_source"] = {"old": item.target_url_source, "new": "user_input"}
+                item.target_url_source = "user_input"
+            else:
+                changes["target_url_source"] = {"old": item.target_url_source, "new": "pending_user"}
+                item.target_url_source = "pending_user"
+
     if changes:
         audit_log(
             db, user_id=str(user.id),
@@ -362,7 +380,8 @@ async def generate_content(item_id: str, user=Depends(get_current_user),
     if not item.target_url:
         raise HTTPException(400, {
             "error": "missing_target_url",
-            "message": "FAQ generation requires a target_url to scrape. This item has none.",
+            "message": "Pick a URL on your site where this FAQ should live, "
+                       "then click Generate. (Open the validation page to set it.)",
         })
 
     # Dedupe in-flight job (don't double-enqueue if user clicks twice)

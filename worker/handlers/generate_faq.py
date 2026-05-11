@@ -104,9 +104,15 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
         )
 
     if not item.target_url:
-        raise RuntimeError(
-            f"ScanContentItem {item_id} has no target_url — FAQ generation requires "
-            f"a target page to scrape. Set target_url on the opportunity first."
+        # A2 stepping-stone: on competitor scans (and any ContentItem where the
+        # system couldn't infer a user page), target_url is left NULL and
+        # target_url_source='pending_user' so the validation page can prompt
+        # the user. The API should already gate Generate, this is the worker-
+        # side defensive guard.
+        from exceptions import PermanentScanError
+        raise PermanentScanError(
+            f"FAQ generation needs a target URL. Open the item in the validation "
+            f"page and pick a URL on your site that should host this FAQ."
         )
 
     # Mark as generating so the UI can show a spinner state if it polls

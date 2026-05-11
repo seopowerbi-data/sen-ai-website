@@ -116,6 +116,17 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     db.commit()
 
     total = sum(counts.values())
+
+    # Bridge: materialize ScanContentItem rows from the FAQ-eligible opportunities
+    # we just wrote, so the Content Kanban gets populated automatically. Runs
+    # after this handler completes (FIFO queue), reads ScanOpportunity rows.
+    # Skip the enqueue if no opportunities qualify — saves a no-op job.
+    if counts.get("critique", 0) + counts.get("haute", 0) > 0:
+        from models import Job
+        db.add(Job(scan_id=scan_id, job_type="materialize_content_items"))
+        db.commit()
+        logger.info(f"Enqueued materialize_content_items for scan {scan_id}")
+
     logger.info(f"Generated {total} opportunities: {counts}")
     return {"total": total, **counts}
 

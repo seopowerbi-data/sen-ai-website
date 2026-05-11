@@ -299,6 +299,10 @@ class ScanContentItem(Base):
     target_url = Column(Text)
     target_page_title = Column(String(500))
     target_question = Column(Text)
+    # Provenance of target_url — drives Kanban "Needs URL" badge + validation UI.
+    # Values: scan_result | pending_user | user_input | auto_suggest (Phase D).
+    # See api/migrations/020_target_url_source.sql for semantics.
+    target_url_source = Column(Text)
 
     # Content
     content_html = Column(Text)

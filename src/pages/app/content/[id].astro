@@ -143,12 +143,25 @@ function fmtDate(iso: string | null): string {
                 🔄 Reload metrics
               </button>
             </template>
-            <template x-if="item.status === 'identified' || item.status === 'generating'">
+            <template x-if="(item.status === 'identified' || item.status === 'generating') && item.content_type === 'faq'">
+              <button @click="generate()"
+                      :disabled="generating || !item.target_url || item.status === 'generating'"
+                      :class="(generating || !item.target_url) ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-coral text-white hover:bg-coral-dark hover:shadow-md'"
+                      class="px-4 py-2 rounded-lg text-sm font-semibold transition-all flex items-center gap-2"
+                      :title="!item.target_url ? 'Set a target URL first' : (generating ? 'Generation in progress…' : 'Generate FAQ content (~60s)')">
+                <span x-show="!generating">⚡ Generate FAQ</span>
+                <span x-show="generating">⏳ Generating…</span>
+              </button>
+            </template>
+            <template x-if="(item.status === 'identified' || item.status === 'generating') && item.content_type !== 'faq'">
               <button class="px-4 py-2 bg-gray-100 text-gray-400 rounded-lg text-sm font-semibold cursor-not-allowed flex items-center gap-2"
                       disabled
-                      title="Generate FAQ / Article — coming in Phase B/C">
-                ⚡ Generate (Phase B/C)
+                      title="Article generation — coming in Phase C">
+                ⚡ Generate (Phase C)
               </button>
+            </template>
+            <template x-if="generateError">
+              <div class="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1 max-w-xs" x-text="generateError"></div>
             </template>
             <template x-if="item.status === 'rejected'">
               <span class="text-xs text-gray-500 italic">Rejected · no further action</span>
@@ -184,13 +197,34 @@ function fmtDate(iso: string | null): string {
               <dd class="text-charcoal-dark mt-0.5 italic" x-text="item.target_question || '—'"></dd>
             </div>
             <div class="sm:col-span-2">
-              <dt class="text-[10px] uppercase tracking-wide text-charcoal-light">Target URL</dt>
-              <dd class="mt-0.5">
+              <dt class="text-[10px] uppercase tracking-wide text-charcoal-light flex items-center gap-2">
+                <span>Target page</span>
+                {/* Confidence slot — reserved for Phase D auto-suggest (Pilier 3, see project_roadmap_content_port.md) */}
+                <span class="text-[9px] text-gray-400 italic" title="Auto-suggest with confidence score coming in Phase D (sitemap index)">Confidence: —</span>
+              </dt>
+              {/* Banner shown only when URL not yet set — Aesthetic-Usability + Tesler */}
+              <template x-if="!item.target_url">
+                <div class="mt-1 mb-2 p-2.5 bg-amber-50 border border-amber-200 rounded text-[11px] text-amber-900 leading-relaxed">
+                  <strong>Pick a URL on your site</strong> where this FAQ should live. The page content drives the FAQ's voice and the citations the LLM uses, so this page must be on a brand you control.
+                </div>
+              </template>
+              <dd class="mt-0.5 space-y-1">
+                <input type="url"
+                       inputmode="url"
+                       placeholder="https://your-brand-site.com/page-that-should-answer-this"
+                       :value="item.target_url || ''"
+                       @input="item.target_url = $event.target.value; markUnsaved(); scheduleSave();"
+                       :disabled="item.status === 'published' || item.status === 'rejected'"
+                       class="w-full text-sm border rounded px-2 py-1.5 focus:outline-none focus:border-coral disabled:bg-gray-50 disabled:text-gray-500"
+                       :class="item.target_url ? 'border-gray-200' : 'border-amber-300'" />
                 <template x-if="item.target_url">
-                  <a :href="item.target_url" target="_blank" rel="noopener" class="text-coral hover:underline break-all" x-text="item.target_url"></a>
+                  <a :href="item.target_url" target="_blank" rel="noopener"
+                     class="text-[11px] text-coral hover:underline inline-flex items-center gap-1">
+                    Open page in new tab ↗
+                  </a>
                 </template>
-                <template x-if="!item.target_url">
-                  <span class="text-charcoal-light">—</span>
+                <template x-if="item.target_url_source">
+                  <span class="text-[10px] text-gray-400 italic" x-text="'Source: ' + item.target_url_source.replace('_', ' ')"></span>
                 </template>
               </dd>
             </div>
@@ -464,6 +498,9 @@ function fmtDate(iso: string | null): string {
         openRejectModal: false,
         openPublishModal: false,
         publishUrl: '',
+        generating: false,
+        generateError: '',
+        generatePollTimer: null,
 
         statusLabelOf(s) {
           const m = { identified: 'IDENTIFIED', generating: 'GENERATING', draft: 'DRAFT', in_review: 'IN REVIEW', approved: 'APPROVED', published: 'PUBLISHED', rejected: 'REJECTED' };
@@ -498,7 +535,12 @@ function fmtDate(iso: string | null): string {
 
         nextStepHint() {
           const s = this.item.status;
-          if (s === 'identified' || s === 'generating') return 'Awaiting content generation (Phase B/C)';
+          if (s === 'identified') {
+            if (!this.item.target_url) return 'Set a target URL above, then click Generate';
+            if (this.item.content_type === 'faq') return 'Ready to generate FAQ';
+            return 'Awaiting content generation (Phase C)';
+          }
+          if (s === 'generating') return 'Generation in progress (~60s)…';
           if (s === 'draft' || s === 'in_review') return 'Awaiting your approval';
           if (s === 'approved') return 'Awaiting publish — set the live URL';
           return '';
@@ -525,6 +567,7 @@ function fmtDate(iso: string | null): string {
           const body = {
             content_html: this.item.content_html,
             content_text: this.item.content_text,
+            target_url: this.item.target_url || null,
             ...(extraPatch || {}),
           };
           try {
@@ -548,6 +591,48 @@ function fmtDate(iso: string | null): string {
 
         async approve() {
           await this.save({ validation: 'approved', status: 'approved' });
+        },
+
+        async generate() {
+          if (this.generating || !this.item.target_url) return;
+          // Flush any pending URL edit so the worker sees the committed target_url.
+          if (this.saveState === 'unsaved') {
+            await this.save();
+          }
+          this.generating = true;
+          this.generateError = '';
+          try {
+            const r = await fetch('/api/content-items/' + this.item.id + '/generate', {
+              method: 'POST',
+            });
+            if (!r.ok) {
+              const body = await r.json().catch(() => ({}));
+              const msg = body.detail?.message || body.detail || ('HTTP ' + r.status);
+              this.generateError = msg;
+              this.generating = false;
+              return;
+            }
+            // Poll item every 3s — when status flips away from generating/identified, reload.
+            const poll = async () => {
+              try {
+                const pr = await fetch('/api/content-items/' + this.item.id);
+                if (pr.ok) {
+                  const d = await pr.json();
+                  this.item = d;
+                  if (d.status !== 'identified' && d.status !== 'generating') {
+                    this.generating = false;
+                    window.location.reload();
+                    return;
+                  }
+                }
+              } catch (_) {}
+              this.generatePollTimer = setTimeout(poll, 3000);
+            };
+            this.generatePollTimer = setTimeout(poll, 3000);
+          } catch (e) {
+            this.generateError = e.message || 'Request failed';
+            this.generating = false;
+          }
         },
         async setValidation(v) {
           await this.save({ validation: v });
