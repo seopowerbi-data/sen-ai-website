@@ -11,10 +11,17 @@ function renderCell(value: boolean | string) {
 
 <section id="comparatif" class="py-20 sm:py-28 px-4">
   <div class="max-w-4xl mx-auto">
-    <!-- Titre -->
-    <h2 class="text-3xl sm:text-4xl font-bold text-charcoal-dark text-center mb-16">
-      {comparison.title}
-    </h2>
+    <!-- Titre + sous-titre -->
+    <div class="text-center mb-12">
+      <h2 class="text-3xl sm:text-4xl font-bold text-charcoal-dark mb-4">
+        {comparison.title}
+      </h2>
+      {comparison.subtitle && (
+        <p class="text-lg text-charcoal-light max-w-2xl mx-auto">
+          {comparison.subtitle}
+        </p>
+      )}
+    </div>
 
     <!-- Tableau responsive -->
     <div class="overflow-x-auto rounded-2xl border border-gray-200 bg-white">

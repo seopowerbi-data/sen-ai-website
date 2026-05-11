@@ -5,11 +5,11 @@ const waUrl = `https://wa.me/${phone}?text=${encodeURIComponent(waMessage)}`;
 const emailUrl = "mailto:contact@sen-ai.fr?subject=Contact%20sen-ai.fr&body=Bonjour%2C%20je%20souhaite%20en%20savoir%20plus%20sur%20vos%20solutions%20sen-ai.fr.";
 ---
 
-<!-- Bouton flottant -->
+<!-- Bouton flottant (desktop uniquement - sur mobile, le sticky audit bar prend la place) -->
 <button
   id="contact-toggle"
   aria-label="Nous contacter"
-  class="fixed bottom-6 right-6 z-50 flex items-center justify-center w-14 h-14 bg-coral text-white rounded-full shadow-lg hover:shadow-xl hover:scale-105 transition-all duration-300"
+  class="hidden md:flex fixed bottom-6 right-6 z-50 items-center justify-center w-14 h-14 bg-coral text-white rounded-full shadow-lg hover:shadow-xl hover:scale-105 transition-all duration-300"
 >
   <!-- Icône message -->
   <svg class="w-6 h-6 contact-icon-open" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">

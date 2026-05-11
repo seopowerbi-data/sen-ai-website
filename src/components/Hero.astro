@@ -1,6 +1,12 @@
 ---
 import site from '../content/site.json';
 const { hero } = site;
+
+const trustIcons: Record<string, string> = {
+  clock: '<path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />',
+  shield: '<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M3.75 12c0 4.142 3.358 7.5 7.5 7.5s7.5-3.358 7.5-7.5-3.358-7.5-7.5-7.5-7.5 3.358-7.5 7.5Z" />',
+  check: '<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 0 1-1.043 3.296 3.745 3.745 0 0 1-3.296 1.043A3.745 3.745 0 0 1 12 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 0 1-3.296-1.043 3.745 3.745 0 0 1-1.043-3.296A3.745 3.745 0 0 1 3 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 0 1 1.043-3.296 3.746 3.746 0 0 1 3.296-1.043A3.746 3.746 0 0 1 12 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 0 1 3.296 1.043 3.746 3.746 0 0 1 1.043 3.296A3.745 3.745 0 0 1 21 12Z" />'
+};
 ---
 
 <section class="relative min-h-screen flex items-center py-24 sm:py-16 overflow-hidden bg-gradient-to-br from-white via-white to-coral/5">
@@ -16,7 +22,7 @@ const { hero } = site;
 
         <!-- H1 produit-centric : question hooky qui dit ce que le produit fait -->
         <h1 class="text-4xl sm:text-5xl lg:text-[3.25rem] font-bold text-charcoal-dark leading-[1.1] mb-5">
-          Que disent <span class="text-coral">ChatGPT, Gemini et Perplexity</span> de votre marque ?
+          Que disent <span class="text-coral">ChatGPT et Gemini</span> de votre marque ?
         </h1>
 
         <!-- Description -->
@@ -41,9 +47,14 @@ const { hero } = site;
         </div>
 
         <!-- Trust signals -->
-        <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-charcoal-light">
+        <div class="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-charcoal-light">
           {hero.trust_signals.map((t) => (
-            <span>{t}</span>
+            <span class="inline-flex items-center gap-1.5">
+              <svg class="w-3.5 h-3.5 text-charcoal-light/70 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.75" stroke="currentColor">
+                <Fragment set:html={trustIcons[t.icon]} />
+              </svg>
+              {t.label}
+            </span>
           ))}
         </div>
       </div>

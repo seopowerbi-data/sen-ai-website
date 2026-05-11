@@ -13,19 +13,55 @@
     "cta_primary": "Mon audit gratuit en 24h",
     "cta_secondary": "Découvrir AI Scan",
     "trust_signals": [
-      "📨 Réponse 24h",
-      "🔒 Données privées",
-      "✨ Sans CB ni engagement"
+      { "icon": "clock", "label": "Réponse en 24h" },
+      { "icon": "shield", "label": "Données privées" },
+      { "icon": "check", "label": "Sans CB ni engagement" }
     ]
+  },
+  "faq": {
+    "title": "Questions fréquentes",
+    "subtitle": "Tout ce que les premiers visiteurs nous demandent.",
+    "items": [
+      {
+        "q": "C'est vraiment gratuit, sans piège ?",
+        "a": "Oui. Pas de carte bancaire, pas d'engagement. L'audit gratuit couvre 1 sujet précis avec 3 personas réalistes et 6 questions posées à ChatGPT et Gemini. Si vous voulez aller plus loin (suivi mensuel, plus de sujets, dashboard live), c'est facturé à l'impact - jamais en abonnement caché."
+      },
+      {
+        "q": "En combien de temps je reçois mon audit ?",
+        "a": "24h après confirmation de votre demande par email (lien magique anti-spam). On lance le scan, on analyse, on rédige le mini-rapport actionable. Vous recevez tout par email, sans avoir à créer de compte."
+      },
+      {
+        "q": "Vous regardez quoi concrètement ?",
+        "a": "Sur le sujet que vous choisissez, on simule 3 profils de vos clients-types (basés sur des données SEO réelles) et on leur fait poser 6 questions à ChatGPT et Gemini. On capture si votre marque est citée, à quelle position, avec quels concurrents, et avec quel sentiment."
+      },
+      {
+        "q": "Mes données sont-elles partagées ou revendues ?",
+        "a": "Non. On utilise uniquement votre nom de domaine et le sujet que vous donnez pour faire l'audit. Aucune donnée client, aucun tracking, aucun partage avec qui que ce soit. Hébergement Hetzner (UE). Détails dans la Privacy Policy."
+      },
+      {
+        "q": "Je suis obligé de continuer après l'audit ?",
+        "a": "Aucune obligation. L'audit est offert pour vous montrer la valeur. Si vous voulez la suite (suivi mensuel, plus de sujets, dashboard interactif, génération de contenu), on en discute. Sinon vous repartez avec votre rapport et c'est tout."
+      },
+      {
+        "q": "Ça marche pour les marques B2B ou seulement B2C ?",
+        "a": "Les deux. Les IA répondent aux deux types de questions. La méthode est identique - les personas et les questions sont juste calibrés au contexte (acheteur pro vs consommateur final, cycle de décision long vs court, etc.)."
+      }
+    ]
+  },
+  "testimonial": {
+    "label": "Ils en parlent",
+    "quote": "On a découvert qu'un concurrent était cité 3x plus que nous sur 'anti-âge sensible'. En 2 mois on a inversé la tendance grâce aux actions prioritaires identifiées.",
+    "role": "Direction Marketing",
+    "company": "Marque dermo-cosmétique top 5 France"
   },
   "audit_form": {
     "badge": "Audit gratuit",
     "title": "Votre audit IA en 24h",
-    "subtitle": "Comment ChatGPT, Gemini et Perplexity parlent (ou pas) de votre marque sur un sujet précis.",
+    "subtitle": "Comment ChatGPT et Gemini parlent (ou pas) de votre marque sur un sujet précis.",
     "value_label": "Ce que vous allez recevoir",
     "value_bullets": [
       "3 personas réalistes de vos clients sur le sujet choisi",
-      "6 questions clés posées à ChatGPT, Gemini et Perplexity",
+      "6 questions clés posées à ChatGPT et Gemini",
       "Un mini-rapport actionable avec ce que dit l'IA de vous",
       "Aucune carte bancaire, aucun engagement"
     ],
@@ -79,31 +115,43 @@
         {
           "id": "persona",
           "title": "On pense comme vos clients",
-          "description": "À partir de vos données SEO (Haloscan), on crée des profils réalistes - pas des personas marketing, mais des vrais comportements de recherche, ancrés dans vos segments métier.",
-          "icon": "user"
+          "description": "Profils réalistes basés sur vos vraies données SEO. Pas des personas marketing.",
+          "icon": "user",
+          "example": {
+            "label": "Exemple",
+            "text": "Sophie, 38 ans, peau réactive, achète en pharmacie, cherche un avis avant d'acheter."
+          }
         },
         {
           "id": "question",
           "title": "On pose leurs questions",
-          "description": "Chaque profil génère les questions qu'il poserait naturellement à ChatGPT ou Gemini - urgentes, comparatives, techniques, de validation.",
-          "icon": "chat"
+          "description": "Chaque profil génère les questions qu'il poserait à l'IA : urgentes, comparatives, techniques.",
+          "icon": "chat",
+          "example": {
+            "label": "Exemples de questions",
+            "items": [
+              { "tag": "Urgente", "text": "Quelle crème pour calmer une rougeur du visage ce soir ?" },
+              { "tag": "Comparative", "text": "Avène ou La Roche-Posay pour peau sensible ?" },
+              { "tag": "Technique", "text": "Composition de la crème Tolérance Extrême ?" }
+            ]
+          }
         },
         {
           "id": "test",
-          "title": "On interroge les IA à leur place",
-          "description": "On soumet ces questions aux LLMs et on observe : est-ce que votre marque est citée ? À quelle position ? Avec quel concurrent à côté ?",
+          "title": "On interroge ChatGPT et Gemini",
+          "description": "On capture qui est cité, à quelle position, à côté de quel concurrent.",
           "icon": "beaker"
         },
         {
           "id": "analyse",
-          "title": "On décode ce que l'IA pense de vous",
-          "description": "Taux de citation, sentiment, recommandations produit, gaps vs concurrents - tout est segmenté par univers métier, pas noyé dans une moyenne globale.",
+          "title": "On décode les réponses",
+          "description": "Citation, sentiment, gaps concurrents - segmentés par univers métier, pas par moyenne globale.",
           "icon": "chart"
         },
         {
           "id": "livrable",
           "title": "On vous donne les clés pour agir",
-          "description": "Une newsletter mensuelle pour la marque - ce qui a changé, ce qu'il faut faire. Un dashboard interactif pour ceux qui veulent explorer chaque donnée en détail.",
+          "description": "Newsletter actionable + dashboard interactif. Le quoi faire pour la marque, le détail pour les curieux.",
           "icon": "document"
         }
       ]
@@ -217,16 +265,17 @@
     }
   },
   "comparison": {
-    "title": "Générique vs. sur-mesure",
+    "title": "Pourquoi nous et pas les autres ?",
+    "subtitle": "La plupart des outils AI SEO vous donnent un dashboard générique. Nous, on calibre tout sur vos données et votre métier.",
     "columns": ["", "Outil générique", "sen-ai.fr"],
     "rows": [
-      { "feature": "Personas basées sur vos vraies données SEO (Haloscan)", "generic": false, "senai": true },
-      { "feature": "Questions calibrées sur vos segments métier", "generic": false, "senai": true },
+      { "feature": "Personas basés sur vos vraies données SEO (pas un template)", "generic": false, "senai": true },
+      { "feature": "Questions calibrées sur votre métier et vos segments", "generic": false, "senai": true },
       { "feature": "Analyse par univers produit (pas une moyenne globale)", "generic": false, "senai": true },
-      { "feature": "Newsletter actionnable pour la marque", "generic": false, "senai": true },
-      { "feature": "Dashboard interactif pour explorer chaque donnée en profondeur", "generic": false, "senai": true },
-      { "feature": "Configuration sur vos marques, produits, concurrents", "generic": false, "senai": true },
-      { "feature": "Multi-LLM (ChatGPT, Gemini, Perplexity...)", "generic": "partiel", "senai": true }
+      { "feature": "Concurrents tracés sujet par sujet", "generic": false, "senai": true },
+      { "feature": "Mini-rapport actionable (le quoi faire, pas juste les chiffres)", "generic": false, "senai": true },
+      { "feature": "Multi-LLM testés (ChatGPT et Gemini)", "generic": "partiel", "senai": true },
+      { "feature": "Facturation à l'impact (pas d'abonnement à vie)", "generic": false, "senai": true }
     ]
   },
   "engagement": {

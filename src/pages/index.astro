@@ -2,27 +2,33 @@
 import BaseLayout from '../layouts/BaseLayout.astro';
 import Nav from '../components/Nav.astro';
 import Hero from '../components/Hero.astro';
+import Testimonial from '../components/Testimonial.astro';
 import AiScan from '../components/AiScan.astro';
 import Comparison from '../components/Comparison.astro';
 import Engagement from '../components/Engagement.astro';
+import Faq from '../components/Faq.astro';
 import OtherSolutions from '../components/OtherSolutions.astro';
 import Story from '../components/Story.astro';
 import Footer from '../components/Footer.astro';
 import WhatsApp from '../components/WhatsApp.astro';
 import AuditRequestModal from '../components/AuditRequestModal.astro';
+import StickyAuditBar from '../components/StickyAuditBar.astro';
 ---
 
 <BaseLayout>
   <Nav />
   <main id="main-content">
     <Hero />
+    <Testimonial />
     <AiScan />
     <Comparison />
     <Engagement />
+    <Faq />
     <OtherSolutions />
     <Story />
   </main>
   <Footer />
   <WhatsApp />
   <AuditRequestModal />
+  <StickyAuditBar />
 </BaseLayout>

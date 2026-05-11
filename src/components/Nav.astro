@@ -21,9 +21,13 @@
         <a href="#histoire" class="text-charcoal hover:text-coral transition-colors text-sm font-medium">Notre histoire</a>
         <span class="w-px h-5 bg-gray-200" aria-hidden="true"></span>
         <a href="/login" class="text-charcoal-light hover:text-charcoal-dark transition-colors text-sm font-medium">Log in</a>
-        <a href="/register" class="inline-flex items-center px-4 py-2 border-2 border-coral text-coral text-sm font-medium rounded-lg hover:bg-coral hover:text-white transition-colors">
-          Start AI Scan
-        </a>
+        {/* "Start AI Scan" / register button - temporarily hidden, registrations closed.
+            To reopen: uncomment + flip api config.registration_open=True. See MEMORY.md "Registration toggle". */}
+        {false && (
+          <a href="/register" class="inline-flex items-center px-4 py-2 border-2 border-coral text-coral text-sm font-medium rounded-lg hover:bg-coral hover:text-white transition-colors">
+            Start AI Scan
+          </a>
+        )}
         <button id="nav-contact-desktop" class="inline-flex items-center px-4 py-2 bg-coral text-white text-sm font-medium rounded-lg hover:bg-coral-dark transition-colors cursor-pointer">
           Contact
         </button>
@@ -45,9 +49,12 @@
         <a href="#histoire" class="text-charcoal hover:text-coral transition-colors py-2 text-sm font-medium">Notre histoire</a>
         <div class="h-px bg-gray-200 my-1" aria-hidden="true"></div>
         <a href="/login" class="text-charcoal-light hover:text-charcoal-dark transition-colors py-2 text-sm font-medium">Log in</a>
-        <a href="/register" class="inline-flex items-center justify-center px-4 py-2 border-2 border-coral text-coral text-sm font-medium rounded-lg hover:bg-coral hover:text-white transition-colors">
-          Start AI Scan
-        </a>
+        {/* "Start AI Scan" / register - temporarily hidden, registrations closed */}
+        {false && (
+          <a href="/register" class="inline-flex items-center justify-center px-4 py-2 border-2 border-coral text-coral text-sm font-medium rounded-lg hover:bg-coral hover:text-white transition-colors">
+            Start AI Scan
+          </a>
+        )}
         <button id="nav-contact-mobile" class="inline-flex items-center justify-center px-4 py-2 bg-coral text-white text-sm font-medium rounded-lg hover:bg-coral-dark transition-colors cursor-pointer">
           Contact
         </button>
