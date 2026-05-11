@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Read(//c/Users/leed/seo-llm/scripts/**)",
-      "Read(//c/Users/leed/seo-llm/.github/workflows/**)"
-    ]
-  }
-}

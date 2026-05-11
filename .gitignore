@@ -36,3 +36,9 @@ data/duckdb/
 
 # jetbrains setting folder
 .idea/
+
+# Claude Code per-machine settings
+.claude/settings.local.json
+
+# local exploration / scratch
+prototypes/
