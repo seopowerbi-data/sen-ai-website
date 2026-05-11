@@ -98,6 +98,96 @@ def load_handlers():
     HANDLERS["materialize_content_items"] = materialize_content_items.execute
 
 
+# Job types that operate on a single content item (one FAQ / article / …)
+# rather than on the whole scan pipeline. When one of these fails permanently
+# we refund the per-item content_credit and DO NOT cascade to the scan-level
+# failure path (which over-refunds the parent scan's scan_credits and marks
+# the scan as failed even though it actually completed long ago).
+CONTENT_ITEM_JOB_TYPES = {"generate_faq"}  # add "generate_article" in Phase C
+
+
+def _refund_content_item_credit(scan_id, item_id: str, db: Session) -> None:
+    """Refund the unmatched content_credit debit(s) for one item.
+
+    Net-aware idempotency : sums all debit + refund rows tied to this item
+    (descriptions 'FAQ generation: <item_id>' and 'Refund FAQ generation:
+    <item_id>'). If the net is still negative, the user is owed that
+    amount — insert one refund row. If net is 0 or positive, no-op
+    (already fully refunded).
+
+    This handles the retry flow correctly : debit → fail → refund → user
+    fixes target_url → debit → fail → refund. Each generate cycle has its
+    own debit row, and we always pair them.
+
+    This is a per-item refund, distinct from `_refund_scan_credits` which
+    nets all credits tied to a scan. Using the scan-level refund here
+    would also refund the parent scan's scan_credits — wrong, because the
+    scan itself completed long ago, only this content gen attempt failed.
+    """
+    if not scan_id or not item_id:
+        return
+
+    debit_desc = f"FAQ generation: {item_id}"
+    refund_desc = f"Refund FAQ generation: {item_id}"
+
+    rows = (
+        db.query(ClientCredit)
+        .filter(
+            ClientCredit.scan_id == scan_id,
+            ClientCredit.credit_type == "content",
+            ClientCredit.description.in_([debit_desc, refund_desc]),
+        )
+        .all()
+    )
+    if not rows:
+        logger.info(
+            f"No content_credit ledger rows for item {item_id} on scan {scan_id} "
+            f"— skipping refund (likely a job enqueued outside the API path)"
+        )
+        return
+
+    net = sum(r.amount for r in rows)
+    if net >= 0:
+        logger.info(
+            f"Content item {item_id} ledger net = {net}, already fully refunded; "
+            f"skipping"
+        )
+        return
+
+    refund_amount = -net  # positive
+    client_id = rows[0].client_id
+
+    # Serialize against concurrent credit ops on this client
+    db.execute(
+        text("SELECT 1 FROM clients WHERE id = :id FOR UPDATE"),
+        {"id": str(client_id)},
+    )
+
+    latest = (
+        db.query(ClientCredit)
+        .filter(
+            ClientCredit.client_id == client_id,
+            ClientCredit.credit_type == "content",
+        )
+        .order_by(desc(ClientCredit.created_at))
+        .first()
+    )
+    new_balance = (latest.balance_after if latest else 0) + refund_amount
+
+    db.add(ClientCredit(
+        client_id=client_id,
+        credit_type="content",
+        amount=refund_amount,
+        balance_after=new_balance,
+        description=refund_desc,
+        scan_id=scan_id,
+    ))
+    logger.info(
+        f"Refunded {refund_amount} content_credit to client {client_id} "
+        f"for failed FAQ item {item_id}"
+    )
+
+
 def _refund_scan_credits(scan_id, db: Session) -> None:
     """Refund any credits that were debited for this scan.
 
@@ -318,28 +408,52 @@ def poll_and_execute():
                         "permanent": is_permanent,
                     }
 
-                    # Also mark scan as failed + flag retryable for the UI
-                    from models import Scan
-                    from sqlalchemy.orm.attributes import flag_modified
-                    scan = db.query(Scan).filter(Scan.id == job_obj.scan_id).first()
-                    if scan:
-                        scan.status = "failed"
-                        scan.error_message = user_msg
-                        scan.updated_at = datetime.utcnow()
-                        if is_permanent:
-                            summary = dict(scan.summary or {})
-                            summary["retryable"] = False
-                            scan.summary = summary
-                            flag_modified(scan, "summary")
+                    if job_obj.job_type in CONTENT_ITEM_JOB_TYPES:
+                        # Content-item job (one FAQ / article). The parent scan
+                        # already completed; only this item failed. Don't cascade
+                        # to scan.status='failed' and don't run the scan-wide
+                        # refund — refund the per-item content_credit instead.
+                        item_id = (job_obj.payload or {}).get("item_id")
+                        if item_id:
+                            try:
+                                _refund_content_item_credit(job_obj.scan_id, item_id, db)
+                            except Exception:
+                                logger.exception(
+                                    f"Failed to refund content_credit for item {item_id}"
+                                )
+                        # Reset the item back to 'identified' so the user can fix
+                        # the input and retry from the validation page.
+                        try:
+                            from models import ScanContentItem
+                            item = db.query(ScanContentItem).filter(
+                                ScanContentItem.id == item_id
+                            ).first() if item_id else None
+                            if item and item.status in ("generating", "identified"):
+                                item.status = "identified"
+                        except Exception:
+                            logger.exception(f"Failed to reset content item {item_id}")
+                    else:
+                        # Scan-pipeline job — mark scan failed + refund all
+                        # net-debited credits for the scan.
+                        from models import Scan
+                        from sqlalchemy.orm.attributes import flag_modified
+                        scan = db.query(Scan).filter(Scan.id == job_obj.scan_id).first()
+                        if scan:
+                            scan.status = "failed"
+                            scan.error_message = user_msg
+                            scan.updated_at = datetime.utcnow()
+                            if is_permanent:
+                                summary = dict(scan.summary or {})
+                                summary["retryable"] = False
+                                scan.summary = summary
+                                flag_modified(scan, "summary")
 
-                    # Auto-refund any credits debited for this scan so the
-                    # user is not charged for a job that never delivered.
-                    try:
-                        _refund_scan_credits(job_obj.scan_id, db)
-                    except Exception:
-                        logger.exception(
-                            f"Failed to refund credits for scan {job_obj.scan_id}"
-                        )
+                        try:
+                            _refund_scan_credits(job_obj.scan_id, db)
+                        except Exception:
+                            logger.exception(
+                                f"Failed to refund credits for scan {job_obj.scan_id}"
+                            )
                 else:
                     job_obj.status = "pending"  # Retry
 
