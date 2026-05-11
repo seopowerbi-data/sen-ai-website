@@ -52,16 +52,22 @@ Le chantier "16 fichiers non-commités" (audit-gratuit + homepage refresh + regi
 
 ## Reste à faire — par priorité
 
-| Item | Effort | Priorité |
-|---|---|---|
-| **Fix architectural competitor brand bias** (option a ou b) | ~3-4h | 🔴 Stratégique |
-| Wire `format_workspace_brief` dans classify_topics + autres analysers | ~30min | 🟡 |
-| Credit debit/refund 1 content_credit/FAQ | ~1h | 🟡 |
-| FAQ-specific validation UI (Q/R rows view) | ~1.5h | 🟡 |
-| Décider site.json (PF testimonial vs neutre) | discussion | 🟡 marketing |
-| Tip.astro tooltips vertical-neutres | ~20min | 🟢 polish |
-| APScheduler infra (Phase D dep) | ~0.5j | 🟢 |
-| Site type classifier `classify_citation_domains.py` | ~1j | 🟢 (Phase C extension) |
+**Décision 2026-05-11** : Option A2 (manual pick `target_url` user-side) comme stepping stone. Long-term vision = 7 piliers UX dans `project_roadmap_content_port.md`. Tout patch livré = stepping stone, pas cul-de-sac (audit columns + UI placeholders).
+
+| Item | Effort | Priorité | Pilier |
+|---|---|---|---|
+| **A2 — Manual target_url pick + audit column `target_url_source`** | ~5h | 🔴 Stratégique | 3 (foundation) |
+| Wire `format_workspace_brief` dans classify_topics + autres analysers | ~30min | 🟡 | 1 |
+| Credit debit/refund 1 content_credit/FAQ | ~1h | 🟡 | — |
+| FAQ-specific validation UI (Q/R rows view) | ~1.5h | 🟡 | 5 (foundation) |
+| Décider site.json (PF testimonial vs neutre) | discussion | 🟡 marketing | — |
+| Tip.astro tooltips vertical-neutres | ~20min | 🟢 polish | — |
+| Phase D — Sitemap index (débloque A1 auto-suggest + Pilier 4) | ~5j | 🟢 next big | 3 |
+| Phase E élargie — Side-by-side validation + measurement loop | ~14j | 🟢 long-term | 5, 7 |
+| Phase F — Voice fingerprint | ~7j | 🟢 long-term | 4 |
+| Phase G — CMS integrations | ~10j | 🟢 long-term | 6 |
+| APScheduler infra (Phase D + Phase E dep) | ~0.5j | 🟢 | — |
+| Site type classifier `classify_citation_domains.py` | ~1j | 🟢 | — |
 
 ## ⚠️ Pièges à connaître
 
