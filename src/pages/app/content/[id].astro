@@ -424,6 +424,7 @@ function fmtDate(iso: string | null): string {
                      x-html="renderedContentHtml()"
                      @focusin="visualEditingActive = true"
                      @focusout="visualEditingActive = false"
+                     @mousedown="onContentMouseDown($event)"
                      @click="onContentClick($event)"
                      @input.debounce.500ms="onVisualEdit($event)"></div>
                 <div x-show="editorMode === 'html'">
@@ -926,17 +927,43 @@ function fmtDate(iso: string | null): string {
           this.saveTimer = setTimeout(() => this.save(), 2000);
         },
 
-        // contenteditable swallows clicks on <a> by default — the browser
-        // places the caret instead of following the link. We intercept and
-        // open in a new tab so Source citations behave like real links in
-        // Visual mode. Edits to the link element (drag, double-click to
-        // select word) still work because we only act on plain clicks.
-        onContentClick(e) {
-          const a = e.target.closest && e.target.closest('a[href]');
+        // contenteditable swallows the link-follow behavior on <a> elements
+        // — the browser places the caret instead of opening the URL. The
+        // earlier @click-only handler missed the click in some browsers
+        // because contenteditable consumes the gesture during mousedown,
+        // BEFORE click fires. We hook mousedown to beat the caret-placement
+        // and call window.open directly. The @click handler stays as a
+        // belt-and-braces fallback for browsers that still bubble click.
+        // Edit gestures (text selection drag, double-click) still work
+        // because we only act on left-click that landed inside an <a>.
+        _findAnchorFromEvent(e) {
+          let el = e.target;
+          if (el && el.nodeType === 3 /* TEXT_NODE */) el = el.parentElement;
+          if (!el || !el.closest) return null;
+          return el.closest('a[href]');
+        },
+        _isPlainLeftClick(e) {
+          return e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey;
+        },
+        onContentMouseDown(e) {
+          const a = this._findAnchorFromEvent(e);
           if (!a) return;
-          // Allow keyboard / middle-click / modifier defaults (open in tab,
-          // copy link, etc.) so power users keep their muscle memory.
-          if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+          if (!this._isPlainLeftClick(e)) return;
+          // preventDefault here stops contenteditable from placing the caret
+          // inside the anchor — the subsequent click would still fire but
+          // the link is already opened in a new tab.
+          e.preventDefault();
+          e.stopPropagation();
+          window.open(a.href, '_blank', 'noopener,noreferrer');
+        },
+        onContentClick(e) {
+          // Belt-and-braces : if mousedown didn't catch (e.g. touchscreen
+          // synthesizes click without a preceding mousedown), we still try
+          // here. _isPlainLeftClick + the prior preventDefault on mousedown
+          // means this rarely fires for already-handled clicks.
+          const a = this._findAnchorFromEvent(e);
+          if (!a) return;
+          if (!this._isPlainLeftClick(e)) return;
           e.preventDefault();
           e.stopPropagation();
           window.open(a.href, '_blank', 'noopener,noreferrer');
