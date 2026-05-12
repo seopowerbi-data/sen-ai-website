@@ -323,6 +323,28 @@ def _make_workspace_aware_class():
                 filtered_content = "\n\n".join(prefix_parts) + "\n\n---\n\n" + (filtered_content or "")
             return filtered_content, filtered_urls
 
+        def _fetch_scientific_context(self, question_text, source_name):
+            # Same root cause as _fetch_brand_context but on a different code
+            # path : seo_llm's scientific web_search ("trouve des sources
+            # scientifiques sur {topic}") routinely returns competitor brand
+            # product pages because OpenAI interprets it as "find the best
+            # products for the condition". Observed live on 2026-05-12 : a
+            # regen on a clean Avène target_url cited 3 Uriage Xémose product
+            # pages as "scientific sources". The LLM then wrote "la gamme
+            # XEMOSE C8+ d'Uriage propose..." in the FAQ output.
+            #
+            # We allowlist : recognized scientific/medical domains only
+            # (regulators, public health agencies, journals, encyclopedias).
+            # The user's own brand domain comes through brand_urls/content
+            # in _fetch_brand_context — scientific_context shouldn't carry
+            # it back. Defense in depth : the verified_urls list passed to
+            # the LLM (= brand_urls + scientific_urls) stays bounded to
+            # on-brand + trusted scientific, no competitor product pages.
+            raw_content, raw_urls = super()._fetch_scientific_context(question_text, source_name)
+            return _filter_scientific_context_by_allowlist(
+                raw_content, raw_urls, target_site=""
+            )
+
         def _generate_faq(self, row, page_content, brand_content, scientific_content, verified_urls):
             """Override to substitute `target_site` in row with our promoted lead brand domain.
 
@@ -364,6 +386,109 @@ def _get_workspace_aware_class():
     if _WorkspaceAwareFAQGenerator is None:
         _WorkspaceAwareFAQGenerator = _make_workspace_aware_class()
     return _WorkspaceAwareFAQGenerator
+
+
+# Trusted scientific/medical source allowlist for `_fetch_scientific_context`.
+# Without this gate, OpenAI's web_search ("trouve des sources scientifiques sur
+# la peau atopique") routinely returns competitor brand product pages
+# (uriage.fr/produits/xemose-..., laroche-posay.fr/...) which seo_llm treats
+# as legitimate citations — the LLM then writes "selon Uriage Xémose, ...".
+# Observed live on 2026-05-12 : 3/4 sources cited in a regen were Uriage
+# product pages even with the brand_context filter in place.
+#
+# We allowlist domains that genuinely host scientific/medical content
+# (regulators, public health agencies, scientific publishers, encyclopedias).
+# Anything else gets dropped from scientific_content + scientific_urls. The
+# allowlist is intentionally generic across verticals — not dermo-cosmetic
+# specific — so it scales to other industries the SaaS will serve.
+_SCIENTIFIC_ALLOWLIST = (
+    # French health authorities
+    "has-sante.fr", "ameli.fr", "vidal.fr", "ansm.sante.fr",
+    "santepubliquefrance.fr", "inserm.fr", "doctolib.fr",
+    # International medical / scientific
+    "nih.gov", "pubmed.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov",
+    "who.int", "europa.eu", "ema.europa.eu", "fda.gov",
+    "cochrane.org", "mayoclinic.org", "clevelandclinic.org",
+    "nhs.uk", "medlineplus.gov", "uptodate.com", "merckmanuals.com",
+    "sciencedirect.com", "nature.com", "thelancet.com", "nejm.org",
+    "bmj.com", "jamanetwork.com",
+    # Encyclopedic / educational (low promotional risk)
+    "wikipedia.org", "wikimedia.org",
+)
+
+
+def _domain_in_allowlist(domain: str) -> bool:
+    """True iff `domain` matches or is a subdomain of any entry in the
+    scientific allowlist. www. is stripped before comparison."""
+    if not domain:
+        return False
+    d = domain.lower()
+    if d.startswith("www."):
+        d = d[4:]
+    return any(d == a or d.endswith("." + a) for a in _SCIENTIFIC_ALLOWLIST)
+
+
+def _filter_scientific_context_by_allowlist(content: str, urls: list[str],
+                                            target_site: str) -> tuple[str, list[str]]:
+    """Drop URLs (and their scraped-text blocks when present) that aren't
+    on target_site OR in _SCIENTIFIC_ALLOWLIST.
+
+    Mirrors _filter_brand_context_by_site but with a broader pass criterion :
+    scientific context legitimately spans medical/regulatory sources outside
+    the user's brand domain. We keep target_site URLs (in case the brand
+    page hosts scientific dossiers) + allowlist domains (regulators,
+    journals, encyclopedias) and drop anything else — most importantly
+    competitor product pages (uriage.fr, laroche-posay.fr, …).
+
+    Same dual-path handling as the brand filter : Serper structured blocks
+    parse cleanly, OpenAI free-form text keeps the body if at least one
+    citation passes (otherwise drops to avoid contamination).
+    """
+    from urllib.parse import urlparse
+
+    def _domain_of(u: str) -> str:
+        try:
+            h = (urlparse(u or "").netloc or "").lower()
+            return h[4:] if h.startswith("www.") else h
+        except Exception:
+            return ""
+
+    ts = (target_site or "").lower()
+    if ts.startswith("www."):
+        ts = ts[4:]
+
+    def _accepted(u: str) -> bool:
+        d = _domain_of(u)
+        if not d:
+            return False
+        if ts and (d == ts or d.endswith("." + ts)):
+            return True
+        return _domain_in_allowlist(d)
+
+    safe_urls = [u for u in (urls or []) if _accepted(u)]
+
+    if not content:
+        return "", safe_urls
+
+    if "URL:" in content:
+        try:
+            chunks = content.split("URL:")
+            kept = []
+            for chunk in chunks[1:]:
+                first_nl = chunk.find("\n")
+                if first_nl < 0:
+                    continue
+                url_line = chunk[:first_nl].strip()
+                body = chunk[first_nl:]
+                if _accepted(url_line):
+                    kept.append(f"URL: {url_line}{body}")
+            return "\n\n".join(kept), safe_urls
+        except Exception:
+            return "", safe_urls
+
+    if safe_urls:
+        return content, safe_urls
+    return "", []
 
 
 def _filter_brand_context_by_site(content: str, urls: list[str], target_site: str) -> tuple[str, list[str]]:
