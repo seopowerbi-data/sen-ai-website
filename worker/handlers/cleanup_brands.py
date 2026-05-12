@@ -93,8 +93,13 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     }
     unclassified_names = [brand.name for _, brand in unclassified_pairs]
 
-    # 4. Call Claude to classify (with domain brief context if available)
-    from adapters.brief_injector import format_brief_context
+    # 4. Call Claude to classify. Inject domain brief + workspace brief so the
+    # classifier knows whose perspective to adopt — critical on competitor scans
+    # where the SCANNED site brand is NOT the user's brand (avoids miscategorizing
+    # competitor product lines as my_brand).
+    from adapters.brief_injector import format_analysis_context
+    from models import Client as _Client
+    _client = db.query(_Client).filter(_Client.id == scan.client_id).first()
     classify_result = asyncio.run(
         classify_brands(
             domain=scan.domain,
@@ -102,7 +107,7 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
             unclassified=unclassified_names,
             existing=existing_context,
             anthropic_api_key=settings.anthropic_api_key,
-            domain_context=format_brief_context(scan.config),
+            domain_context=format_analysis_context(scan.config, _client.apps if _client else None),
         )
     )
     result = classify_result["brands"]

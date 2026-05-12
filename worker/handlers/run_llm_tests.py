@@ -156,12 +156,14 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
                 if target_brands and gemini_pool.has_keys():
                     from seo_llm.src.brand_analyzer import BrandAnalyzer
                     gemini_client = create_llm_client("gemini", gemini_pool.next_key(), model="gemini-2.5-flash-lite")
-                    from adapters.brief_injector import format_brief_context
+                    from adapters.brief_injector import format_analysis_context
+                    from models import Client as _Client
+                    _client = db.query(_Client).filter(_Client.id == scan.client_id).first()
                     brand_analyzer = BrandAnalyzer(
                         llm_client=gemini_client,
                         target_brands=target_brands,
                         all_brands=all_brands,
-                        domain_context=format_brief_context(scan.config),
+                        domain_context=format_analysis_context(scan.config, _client.apps if _client else None),
                     )
                     logger.info(f"BrandAnalyzer configured: target={target_brands}, all={len(all_brands)} brands")
                 else:
