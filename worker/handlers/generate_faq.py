@@ -127,6 +127,7 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
     from seo_llm.src.faq_content_generator import FAQContentGenerator
     from adapters.brief_injector import format_workspace_brief, format_promoted_brands_block
     from services.brand_resolver import resolve_promotion, PromotionUnsetError
+    from services.trust_sources import get_trust_sources_for_client
 
     # ── Resolve workspace context for vertical specialization ────────────
     # client.apps['client_brief'] = industry / voice / positioning / audience
@@ -174,6 +175,22 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
             + ", ".join(excluded_brand_names[:10])
         )
 
+    # ── Resolve the per-client trust source allowlist ─────────────────
+    # Used by the scientific_context subclass override to drop URLs that
+    # aren't on a recognised authority/journal/society for the client's
+    # industry. Empty until the first discover_trust_sources job runs —
+    # in that case we fall back to UNIVERSAL_REFERENCES + TLD patterns
+    # (still blocks Uriage/LRP product pages, just narrower coverage).
+    trust_domains: list[str] = []
+    if client:
+        try:
+            trust_domains = get_trust_sources_for_client(client.id, db)
+        except Exception:
+            logger.exception(
+                f"get_trust_sources_for_client failed for client {client.id} "
+                f"— FAQ will use UNIVERSAL_REFERENCES baseline only"
+            )
+
     # Build a row-compatible dict — the generator calls `row.get(key)` so a
     # plain dict satisfies the interface (no pandas required).
     row = {
@@ -198,6 +215,7 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
             promoted_brands_text=promoted_brands_text,
             excluded_section=excluded_section,
             promoted_lead_brand=(promoted_brand_names[0] if promoted_brand_names else ""),
+            trust_domains=trust_domains,
             writing_provider="openai",
             model=settings.task_models.get("generate_faq") if hasattr(settings, "task_models") else None,
             max_workers=1,
@@ -282,12 +300,14 @@ def _make_workspace_aware_class():
     class _Subclass(FAQContentGenerator):
         def __init__(self, workspace_brief_text: str = "", promoted_brands_text: str = "",
                      excluded_section: str = "", promoted_lead_brand: str = "",
+                     trust_domains: list[str] | None = None,
                      **kwargs):
             super().__init__(**kwargs)
             self._workspace_brief_text = workspace_brief_text
             self._promoted_brands_text = promoted_brands_text
             self._excluded_section = excluded_section
             self._promoted_lead_brand = promoted_lead_brand
+            self._trust_domains = list(trust_domains or [])
 
         def _fetch_brand_context(self, target_site, question_text):
             # Parent's _fetch_brand_context uses a loose natural-language prompt
@@ -342,7 +362,8 @@ def _make_workspace_aware_class():
             # on-brand + trusted scientific, no competitor product pages.
             raw_content, raw_urls = super()._fetch_scientific_context(question_text, source_name)
             return _filter_scientific_context_by_allowlist(
-                raw_content, raw_urls, target_site=""
+                raw_content, raw_urls, target_site="",
+                trust_list=self._trust_domains,
             )
 
         def _generate_faq(self, row, page_content, brand_content, scientific_content, verified_urls):
@@ -388,7 +409,8 @@ def _get_workspace_aware_class():
     return _WorkspaceAwareFAQGenerator
 
 
-# Trusted scientific/medical source allowlist for `_fetch_scientific_context`.
+# Scientific-context filter for `_fetch_scientific_context`.
+#
 # Without this gate, OpenAI's web_search ("trouve des sources scientifiques sur
 # la peau atopique") routinely returns competitor brand product pages
 # (uriage.fr/produits/xemose-..., laroche-posay.fr/...) which seo_llm treats
@@ -396,61 +418,40 @@ def _get_workspace_aware_class():
 # Observed live on 2026-05-12 : 3/4 sources cited in a regen were Uriage
 # product pages even with the brand_context filter in place.
 #
-# We allowlist domains that genuinely host scientific/medical content
-# (regulators, public health agencies, scientific publishers, encyclopedias).
-# Anything else gets dropped from scientific_content + scientific_urls. The
-# allowlist is intentionally generic across verticals — not dermo-cosmetic
-# specific — so it scales to other industries the SaaS will serve.
-_SCIENTIFIC_ALLOWLIST = (
-    # French health authorities
-    "has-sante.fr", "ameli.fr", "vidal.fr", "ansm.sante.fr",
-    "santepubliquefrance.fr", "inserm.fr", "doctolib.fr",
-    "e-cancer.fr", "frm.org",
-    # International medical / scientific authorities
-    "nih.gov", "pubmed.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov",
-    "who.int", "europa.eu", "ema.europa.eu", "fda.gov",
-    "cdc.gov", "cancer.gov", "nice.org.uk",
-    "cochrane.org", "mayoclinic.org", "clevelandclinic.org",
-    "nhs.uk", "medlineplus.gov", "uptodate.com", "merckmanuals.com",
-    # Peer-reviewed journals & academic publishers
-    "sciencedirect.com", "nature.com", "thelancet.com", "nejm.org",
-    "bmj.com", "jamanetwork.com",
-    "springer.com", "wiley.com", "mdpi.com",
-    "frontiersin.org", "plos.org", "biomedcentral.com",
-    # Research news & encyclopedic (low promotional risk)
-    "sciencedaily.com",
-    "wikipedia.org", "wikimedia.org",
-)
-
-
-def _domain_in_allowlist(domain: str) -> bool:
-    """True iff `domain` matches or is a subdomain of any entry in the
-    scientific allowlist. www. is stripped before comparison."""
-    if not domain:
-        return False
-    d = domain.lower()
-    if d.startswith("www."):
-        d = d[4:]
-    return any(d == a or d.endswith("." + a) for a in _SCIENTIFIC_ALLOWLIST)
+# The trust list is per-client, vertical-aware, and discovered on demand by
+# `services.trust_sources.discover_trust_sources` (1 OpenAI web_search call,
+# cached 90 days on `client.apps['trust_sources']`). It always includes the
+# universal Wikipedia + government-TLD baseline as a fallback even before
+# discovery has run — so a client without a brief still benefits from some
+# competitor protection. See `worker/services/trust_sources.py` for the
+# discovery prompt, refresh policy, and merge rules.
 
 
 def _filter_scientific_context_by_allowlist(content: str, urls: list[str],
-                                            target_site: str) -> tuple[str, list[str]]:
-    """Drop URLs (and their scraped-text blocks when present) that aren't
-    on target_site OR in _SCIENTIFIC_ALLOWLIST.
+                                            target_site: str,
+                                            trust_list: list[str] | None = None,
+                                            ) -> tuple[str, list[str]]:
+    """Drop URLs (and their scraped-text blocks when present) that aren't on
+    `target_site` AND aren't in the client's `trust_list` AND don't match a
+    universal authority TLD (.gov / .gouv.fr / .europa.eu / .int / …).
 
     Mirrors _filter_brand_context_by_site but with a broader pass criterion :
     scientific context legitimately spans medical/regulatory sources outside
-    the user's brand domain. We keep target_site URLs (in case the brand
-    page hosts scientific dossiers) + allowlist domains (regulators,
-    journals, encyclopedias) and drop anything else — most importantly
-    competitor product pages (uriage.fr, laroche-posay.fr, …).
+    the user's brand domain. Competitor product pages (uriage.fr,
+    laroche-posay.fr, …) get dropped because they're neither on target_site
+    nor in the discovered authoritative-source list nor under a public-sector
+    TLD.
+
+    `trust_list` is the merged output of `get_trust_sources_for_client` —
+    UNIVERSAL_REFERENCES + discovered domains + user extras. When omitted
+    or empty, the universal baseline still applies via the TLD pattern check.
 
     Same dual-path handling as the brand filter : Serper structured blocks
     parse cleanly, OpenAI free-form text keeps the body if at least one
     citation passes (otherwise drops to avoid contamination).
     """
     from urllib.parse import urlparse
+    from services.trust_sources import is_trusted_domain
 
     def _domain_of(u: str) -> str:
         try:
@@ -463,13 +464,15 @@ def _filter_scientific_context_by_allowlist(content: str, urls: list[str],
     if ts.startswith("www."):
         ts = ts[4:]
 
+    tlist = list(trust_list or [])
+
     def _accepted(u: str) -> bool:
         d = _domain_of(u)
         if not d:
             return False
         if ts and (d == ts or d.endswith("." + ts)):
             return True
-        return _domain_in_allowlist(d)
+        return is_trusted_domain(d, tlist)
 
     safe_urls = [u for u in (urls or []) if _accepted(u)]
 

@@ -389,3 +389,95 @@ async def update_client_brief(client_id: str, req: BriefUpdate,
     flag_modified(client, "apps")
     db.commit()
     return {"ok": True, "edited_by_user": new_brief.get("edited_by_user", True)}
+
+
+# ─── Trust sources (per-client authoritative reference domains) ──────────
+# Discovery is automatically chained from generate_client_brief on success,
+# but these endpoints expose manual control for: seeding existing clients
+# whose brief predates the trust-sources feature, refreshing when the
+# discovered list looks off, and future Settings UI integration.
+
+
+@router.get("/{client_id}/trust-sources")
+async def get_trust_sources(client_id: str, user=Depends(get_current_user),
+                            db: Session = Depends(get_db)):
+    """Read the current trust_sources payload for a client.
+
+    Returns the persisted structure verbatim (or an empty stub if discovery
+    has never run). The Settings UI uses this to render the list + last
+    refresh date + refresh button.
+    """
+    _check_client_access(client_id, user, db)
+    client = db.query(Client).filter(Client.id == client_id).first()
+    if not client:
+        raise HTTPException(404, "Client not found")
+
+    payload = (client.apps or {}).get("trust_sources") or {}
+    return {
+        "ok": True,
+        "trust_sources": {
+            "domains": payload.get("domains") or [],
+            "details": payload.get("details") or [],
+            "extra_domains": payload.get("extra_domains") or [],
+            "industry_text": payload.get("industry_text") or "",
+            "discovered_at": payload.get("discovered_at"),
+            "sources_count": payload.get("sources_count") or 0,
+        },
+    }
+
+
+@router.post("/{client_id}/trust-sources/discover")
+@limiter.limit("3/minute")
+async def discover_trust_sources(request: Request, client_id: str,
+                                  force: bool = False,
+                                  user=Depends(get_current_user),
+                                  db: Session = Depends(get_db)):
+    """Enqueue a discover_trust_sources worker job.
+
+    Requires `client_brief.industry` to be set (otherwise the worker no-ops).
+    Idempotent on the worker side : returns 'fresh' if the cached payload is
+    still within TTL and industry hasn't changed. Pass ?force=true to bypass.
+    """
+    _check_client_access(client_id, user, db)
+    client = db.query(Client).filter(Client.id == client_id).first()
+    if not client:
+        raise HTTPException(404, "Client not found")
+
+    apps = client.apps or {}
+    brief = apps.get("client_brief") or {}
+    if not (brief.get("industry") or "").strip():
+        raise HTTPException(
+            409,
+            {
+                "error": "missing_industry",
+                "message": "Trust source discovery needs a workspace brief with "
+                           "an `industry` field. Generate the workspace brief first.",
+            },
+        )
+
+    in_flight = (
+        db.query(Job)
+        .filter(
+            Job.client_id == client_id,
+            Job.job_type == "discover_trust_sources",
+            Job.status.in_(["pending", "running"]),
+        )
+        .first()
+    )
+    if in_flight:
+        return {
+            "ok": True, "job_id": str(in_flight.id), "status": in_flight.status,
+            "message": "Already in flight",
+        }
+
+    job = Job(
+        client_id=client_id,
+        job_type="discover_trust_sources",
+        status="pending",
+        payload={"client_id": client_id, "force": bool(force)},
+        max_attempts=2,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return {"ok": True, "job_id": str(job.id), "status": "pending"}

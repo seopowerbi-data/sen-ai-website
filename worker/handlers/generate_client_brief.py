@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from config import settings
-from models import Client, ClientBrand
+from models import Client, ClientBrand, Job
 
 logger = logging.getLogger(__name__)
 
@@ -354,6 +354,35 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
         f"({len(brief.get('primary_brands', []))} brands, "
         f"{len(brief.get('key_competitors', []))} competitors)"
     )
+
+    # Chain: enqueue trust-source discovery so downstream content generation
+    # (FAQ, future article) can filter web_search results by an industry-aware
+    # authoritative-domain allowlist. Idempotent on the worker side
+    # (`is_discovery_stale` short-circuits when fresh + industry unchanged), so
+    # firing on every brief generation is safe and self-healing if the chained
+    # job was ever lost.
+    industry = brief.get("industry") or ""
+    if industry.strip():
+        try:
+            db.add(Job(
+                client_id=client.id,
+                job_type="discover_trust_sources",
+                payload={"client_id": str(client.id)},
+            ))
+            db.commit()
+            logger.info(
+                f"Enqueued discover_trust_sources for client {client.id} "
+                f"(industry={industry!r})"
+            )
+        except Exception:
+            # Discovery is best-effort infra; never let a chain failure break
+            # the brief's own success path. The handler can be re-triggered
+            # manually if needed.
+            db.rollback()
+            logger.exception(
+                f"Failed to enqueue discover_trust_sources for client {client.id}"
+            )
+
     return {
         "status": "ok", "provider": used_provider,
         "primary_brands": len(brief.get("primary_brands", [])),
