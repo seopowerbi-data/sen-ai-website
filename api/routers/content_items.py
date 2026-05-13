@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import desc
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm.attributes import flag_modified
 
 from models import (
     ClientBrand, Job, Scan, ScanBrandClassification, ScanContentItem, UserClient, get_db,
@@ -530,6 +531,19 @@ async def update_content_item(item_id: str, patch: ContentItemPatch,
                     "reason": "lead_brand_changed",
                 }
                 item.rejected_target_urls = []
+            # If the materialize handler had auto-suggested a LEAD (chip "Auto"
+            # in the UI), flip the source to 'user' so the chip disappears.
+            # We don't drop the auto record — it stays for audit. Only fire
+            # when the lead actually changed, to avoid spurious flips on
+            # re-saves with identical values.
+            if old_lead != new_lead:
+                meta = dict(item.content_metadata or {})
+                suggestion = dict(meta.get("lead_suggestion") or {})
+                if suggestion and suggestion.get("source") == "auto":
+                    suggestion["source"] = "user"
+                    meta["lead_suggestion"] = suggestion
+                    item.content_metadata = meta
+                    flag_modified(item, "content_metadata")
 
     if patch.target_url is not None:
         # Normalize: empty string from the input becomes NULL (clearing the field)

@@ -130,6 +130,39 @@ def _resolve_target_site(scan, db, item=None) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _auto_suggest_leads(items: list, scan, db) -> dict:
+    """Wrap services.lead_picker.pick_leads_for_items for the materialize handler.
+
+    `items` is the list of (item_obj, question_text, topic_name) tuples used
+    elsewhere in this handler. We unpack into the dict shape pick_leads_for_items
+    expects. Failure mode delegates to the service — empty dict means "fall
+    back to workspace default", which is exactly what the rest of the pipeline
+    already handles.
+    """
+    if not items:
+        return {}
+    try:
+        from services.lead_picker import pick_leads_for_items
+    except Exception as e:
+        logger.warning(f"materialize: lead_picker import failed ({e}) — skipping auto-LEAD")
+        return {}
+
+    payload = [
+        {
+            "id": str(item.id),
+            "topic": topic_name or "",
+            "question": question_text or "",
+            "persona": (getattr(item, "persona_name", None) or "") or "",
+        }
+        for item, question_text, topic_name in items
+    ]
+    try:
+        return pick_leads_for_items(scan.client_id, scan.id, payload, db)
+    except Exception as e:
+        logger.warning(f"materialize: lead_picker crashed ({e}) — falling back to workspace default")
+        return {}
+
+
 def _auto_match_target_urls(items: list, scan, db) -> dict:
     """Run FAQPageMatcher on a list of (item, question_text) pairs.
 
@@ -171,11 +204,17 @@ def _auto_match_target_urls(items: list, scan, db) -> dict:
         logger.warning(f"materialize: FAQPageMatcher unavailable ({e}) — falling back to manual")
         return {}
 
+    # Per-item target_site so Phase 1.5's auto LEAD suggestion drives URL
+    # matching toward the right brand domain. _resolve_target_site reads
+    # item.promoted_brand_ids first when item is passed — set by the lead
+    # picker. Falls back to the workspace target_site computed above when the
+    # item has no override.
     rows = []
     for item, question_text, source_name in items:
+        item_target, _ = _resolve_target_site(scan, db, item=item)
         rows.append({
             "faq_opportunity_id": str(item.id),
-            "target_site": target_site,
+            "target_site": item_target or target_site,
             "question_text": question_text,
             "source_name": source_name or "",
         })
@@ -380,6 +419,31 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     # Flush so the new items get UUIDs assigned, which the matcher needs as keys.
     db.flush()
 
+    # Phase 1.5: auto-suggest per-item LEAD brand via 1 batched Claude call.
+    # Skipped when client has 0 or 1 primary brand with a domain (no choice to
+    # make). Sets item.promoted_brand_ids so Phase 2's _resolve_target_site
+    # picks the right domain for FAQPageMatcher. content_metadata records
+    # provenance so the UI can show an "Auto" chip the user can override.
+    lead_suggestions = _auto_suggest_leads(new_items, scan, db)
+    auto_lead_count = 0
+    if lead_suggestions:
+        for item, _, _ in new_items:
+            sug = lead_suggestions.get(str(item.id))
+            if not sug:
+                continue
+            item.promoted_brand_ids = [sug["brand_id"]]
+            meta = dict(item.content_metadata or {})
+            meta["lead_suggestion"] = {
+                "brand_id": sug["brand_id"],
+                "reason": sug.get("reason") or "",
+                "source": "auto",
+                "model": sug.get("model"),
+            }
+            item.content_metadata = meta
+            auto_lead_count += 1
+        # Re-flush so Phase 2 sees the override on each item.
+        db.flush()
+
     # Phase 2: auto-suggest target_url via FAQPageMatcher on the user's lead brand.
     matches = _auto_match_target_urls(new_items, scan, db)
     auto_matched = 0
@@ -399,6 +463,7 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
         f"materialized={len(new_items)}, skipped_existing={skipped}, "
         f"auto_matched={auto_matched}, "
         f"pending_user={len(new_items) - auto_matched}, "
+        f"auto_lead_suggested={auto_lead_count}, "
         f"is_competitor_scan={competitor}"
     )
 
@@ -406,5 +471,6 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
         "materialized": len(new_items),
         "skipped_existing": skipped,
         "auto_matched": auto_matched,
+        "auto_lead_suggested": auto_lead_count,
         "is_competitor_scan": competitor,
     }

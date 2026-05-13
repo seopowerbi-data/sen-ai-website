@@ -594,6 +594,14 @@ function fmtDate(iso: string | null): string {
                     <span class="text-yellow-400 text-base leading-none shrink-0"
                           title="LEAD brand for this content item">★</span>
                   </template>
+                  {/* Auto-suggested LEAD chip — visible on the LEAD row only,
+                       only when the materialize handler auto-picked this brand
+                       and the user hasn't overridden yet. Disappears on first
+                       override (server flips lead_suggestion.source → 'user'). */}
+                  <template x-if="idx === 0 && isAutoLead()">
+                    <span class="text-[9px] uppercase tracking-wide font-semibold px-1 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-100 shrink-0"
+                          :title="autoLeadTooltip()">Auto</span>
+                  </template>
                   <template x-if="idx !== 0">
                     <button @click="setLead(idx)"
                             :disabled="!canEditLead() || leadSaving"
@@ -1262,6 +1270,28 @@ function fmtDate(iso: string | null): string {
           const s = this.item.status;
           return s === 'identified' || s === 'draft'
               || s === 'in_review' || s === 'rejected';
+        },
+        // True when the current LEAD was auto-suggested by the materialize
+        // handler and the user hasn't overridden yet. The server flips
+        // lead_suggestion.source to 'user' on first PATCH that changes the
+        // lead — so checking source === 'auto' is sufficient, but we ALSO
+        // confirm the suggested brand_id is still the lead (defense in depth
+        // against stale metadata after a manual PATCH that didn't go through
+        // promoted_brand_ids).
+        isAutoLead() {
+          const meta = this.item.content_metadata || {};
+          const sug = meta.lead_suggestion || null;
+          if (!sug || sug.source !== 'auto') return false;
+          const leadId = (this.item.promoted_brand_ids || [])[0];
+          return !!leadId && leadId === sug.brand_id;
+        },
+        autoLeadTooltip() {
+          const meta = this.item.content_metadata || {};
+          const sug = meta.lead_suggestion || null;
+          if (!sug) return 'Auto-suggested LEAD';
+          const reason = (sug.reason || '').trim();
+          const tail = ' — click ☆ on another brand to override.';
+          return reason ? ('Auto-suggested LEAD: ' + reason + tail) : ('Auto-suggested LEAD' + tail);
         },
         async setLead(idx) {
           if (!this.canEditLead()) return;
