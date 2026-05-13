@@ -481,3 +481,103 @@ async def discover_trust_sources(request: Request, client_id: str,
     db.commit()
     db.refresh(job)
     return {"ok": True, "job_id": str(job.id), "status": "pending"}
+
+
+# ─── extra_domains : user-managed prefer-hint extension slot ─────────────
+# These let the user widen the soft prefer-hint list when the discovered
+# domains miss something they trust (e.g., an internal scientific publisher,
+# a niche industry portal). HARD denylist (competitor) is unaffected — these
+# only feed the SOFT prefer-hint list returned by
+# `get_trust_sources_for_client`. The discover handler carries them forward
+# on every refresh.
+
+class ExtraDomainBody(BaseModel):
+    domain: str
+
+
+def _normalize_extra_domain(raw: str) -> str:
+    """Mirror of worker.services.trust_sources._normalize_domain — kept local
+    to avoid importing the worker module from the API container."""
+    import re as _re
+    if not raw or not isinstance(raw, str):
+        return ""
+    nd = _re.sub(r"^https?://", "", raw.strip().lower())
+    if nd.startswith("www."):
+        nd = nd[4:]
+    nd = nd.split("/", 1)[0].strip().rstrip(".")
+    if "." not in nd or len(nd) > 253:
+        return ""
+    # Disallow control chars / spaces — defensive against pasted junk
+    if _re.search(r"[\s<>\"']", nd):
+        return ""
+    return nd
+
+
+@router.post("/{client_id}/trust-sources/extra-domains")
+async def add_trust_source_extra(client_id: str, body: ExtraDomainBody,
+                                  user=Depends(get_current_user),
+                                  db: Session = Depends(get_db)):
+    """Append a user-managed domain to the prefer-hint list."""
+    _check_client_access(client_id, user, db)
+    client = db.query(Client).filter(Client.id == client_id).first()
+    if not client:
+        raise HTTPException(404, "Client not found")
+
+    domain = _normalize_extra_domain(body.domain)
+    if not domain:
+        raise HTTPException(400, {
+            "error": "invalid_domain",
+            "message": "Domain must be a bare hostname (e.g. example.com).",
+        })
+
+    apps = dict(client.apps or {})
+    trust = dict(apps.get("trust_sources") or {})
+    extras = list(trust.get("extra_domains") or [])
+    discovered = {(d or "").lower() for d in (trust.get("domains") or [])}
+
+    if domain in discovered:
+        raise HTTPException(409, {
+            "error": "already_discovered",
+            "message": f"{domain} is already in the discovered list — no need to add it manually.",
+        })
+    if domain in extras:
+        raise HTTPException(409, {
+            "error": "duplicate",
+            "message": f"{domain} is already in your extras.",
+        })
+
+    extras.append(domain)
+    trust["extra_domains"] = extras
+    apps["trust_sources"] = trust
+    client.apps = apps
+    flag_modified(client, "apps")
+    db.commit()
+    return {"ok": True, "extra_domains": extras}
+
+
+@router.delete("/{client_id}/trust-sources/extra-domains/{domain}")
+async def remove_trust_source_extra(client_id: str, domain: str,
+                                     user=Depends(get_current_user),
+                                     db: Session = Depends(get_db)):
+    """Remove a user-managed domain from the prefer-hint list."""
+    _check_client_access(client_id, user, db)
+    client = db.query(Client).filter(Client.id == client_id).first()
+    if not client:
+        raise HTTPException(404, "Client not found")
+
+    normalized = _normalize_extra_domain(domain)
+    if not normalized:
+        raise HTTPException(400, "Invalid domain")
+
+    apps = dict(client.apps or {})
+    trust = dict(apps.get("trust_sources") or {})
+    extras = list(trust.get("extra_domains") or [])
+    if normalized not in extras:
+        raise HTTPException(404, f"{normalized} not in extras")
+    extras = [d for d in extras if d != normalized]
+    trust["extra_domains"] = extras
+    apps["trust_sources"] = trust
+    client.apps = apps
+    flag_modified(client, "apps")
+    db.commit()
+    return {"ok": True, "extra_domains": extras}

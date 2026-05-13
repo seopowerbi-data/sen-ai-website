@@ -1,0 +1,351 @@
+---
+/**
+ * Workspace Settings → Trust sources
+ *
+ * Surfaces the per-client SOFT prefer-hint list that biases content gen
+ * (FAQ, future articles) toward authoritative domains. Two layers shown :
+ *   - Discovered : populated by the discover_trust_sources worker
+ *     (1 OpenAI web_search per client per 90 days, chained from brief gen).
+ *     Read-only here ; user refreshes via the button.
+ *   - Extras : user-managed list, preserved across discovery refreshes.
+ *
+ * HARD denylist (competitor) lives elsewhere (scan-level) and is NOT shown
+ * here — these are quality signals only, not compliance.
+ *
+ * UX Laws:
+ * - Cognitive Load: discovered vs extras visually separated, refresh budget surfaced
+ * - Recognition over Recall: domain + org name + type chip so user remembers what each is
+ * - Doherty Threshold: refresh job is async (~30s), poll until last_refreshed_at advances
+ */
+export const prerender = false;
+import DashboardLayout from '../../../layouts/DashboardLayout.astro';
+
+const token = Astro.cookies.get('token')?.value;
+if (!token) return Astro.redirect('/login');
+
+let clientId: string | null = null;
+let clientName = '';
+try {
+  const res = await fetch('http://api:8000/api/clients/', {
+    headers: { Cookie: `token=${token}` },
+    signal: AbortSignal.timeout(3000),
+  });
+  const clients = res.ok ? await res.json() : [];
+  if (clients[0]) {
+    clientId = clients[0].id;
+    clientName = clients[0].name;
+  }
+} catch {}
+
+let initialTrust: any = {
+  domains: [],
+  details: [],
+  extra_domains: [],
+  industry_text: '',
+  discovered_at: null,
+  sources_count: 0,
+};
+let hasBriefIndustry = false;
+if (clientId) {
+  try {
+    const res = await fetch(`http://api:8000/api/clients/${clientId}/trust-sources`, {
+      headers: { Cookie: `token=${token}` },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      initialTrust = data.trust_sources || initialTrust;
+    }
+  } catch {}
+  try {
+    const res = await fetch(`http://api:8000/api/clients/${clientId}/brief`, {
+      headers: { Cookie: `token=${token}` },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      hasBriefIndustry = !!(data?.brief?.industry || '').trim();
+    }
+  } catch {}
+}
+---
+
+<DashboardLayout title="Trust sources" activeSection="settings">
+  <div class="p-8 max-w-4xl">
+
+    <div class="mb-6">
+      <a href="/app/settings" class="text-xs text-charcoal-light hover:text-coral inline-flex items-center gap-1 mb-2">
+        <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+        Settings
+      </a>
+      <h1 class="text-2xl font-bold text-charcoal-dark">Trust sources</h1>
+      <p class="text-sm text-charcoal-light mt-1">
+        For workspace <span class="font-medium text-charcoal-dark">{clientName || '?'}</span>. These domains are <strong class="text-charcoal-dark">preferred citation targets</strong> for content generation (FAQ, articles) — the LLM is biased to cite them when relevant.
+      </p>
+    </div>
+
+    {/* Info banner */}
+    <details class="mb-6 bg-blue-50/50 border border-blue-100 rounded-lg overflow-hidden group">
+      <summary class="px-4 py-2.5 cursor-pointer hover:bg-blue-50 transition-colors flex items-center gap-2">
+        <svg class="w-4 h-4 text-blue-500 shrink-0 transition-transform group-open:rotate-90" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+        </svg>
+        <svg class="w-4 h-4 text-blue-500 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+        </svg>
+        <span class="text-sm font-medium text-blue-900">How does this work ?</span>
+      </summary>
+      <div class="px-4 py-3 border-t border-blue-100 text-xs text-blue-900/90 leading-relaxed space-y-2">
+        <p><strong>Discovered domains</strong> are auto-populated by analysing your workspace brief (industry + positioning) and asking an LLM which authoritative sources matter most in your sector. Refreshed every 90 days, or on demand.</p>
+        <p><strong>Extra domains</strong> let you widen the list — useful if the discovery missed a portal you trust (an internal scientific publisher, a regional regulator, a niche industry body). These are preserved across refreshes.</p>
+        <p>This list is a <strong>soft preference</strong>, not a hard filter — URLs outside the list still pass through if they're relevant. Competitor blocking happens separately at scan level and is unaffected.</p>
+        <p class="text-blue-800/70 italic">Wikipedia + government TLDs (.gov, .gouv.fr, .europa.eu, …) are always trusted and aren't listed individually here.</p>
+      </div>
+    </details>
+
+    {!clientId ? (
+      <div class="bg-amber-50 border border-amber-200 rounded-xl p-6 text-sm text-amber-900">
+        No workspace found. Create one first, then come back here.
+      </div>
+    ) : (
+      <div x-data={`trustSources(${JSON.stringify(initialTrust)}, '${clientId}', ${JSON.stringify(hasBriefIndustry)})`}>
+
+        {/* Discovered panel */}
+        <div class="bg-white rounded-xl shadow-sm border border-gray-100 mb-6 overflow-hidden">
+          <div class="px-5 py-3 border-b border-gray-100 flex items-baseline justify-between gap-3">
+            <div>
+              <h2 class="text-sm font-semibold text-charcoal-dark flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+                <span>Discovered</span>
+                <span class="text-charcoal-light text-xs font-normal">(<span x-text="discovered.length"></span>)</span>
+              </h2>
+              <p class="text-[11px] text-charcoal-light italic mt-0.5" x-show="lastRefreshed">
+                Last refreshed <span x-text="lastRefreshedLabel"></span> · industry: <span x-text="industryText || '—'"></span>
+              </p>
+              <p class="text-[11px] text-charcoal-light italic mt-0.5" x-show="!lastRefreshed && !refreshing">
+                Not yet discovered — click Refresh to populate.
+              </p>
+            </div>
+            <div class="flex items-center gap-2">
+              <button type="button" @click="refresh()"
+                      :disabled="refreshing || !hasBrief"
+                      :class="(refreshing || !hasBrief) ? 'opacity-50 cursor-not-allowed' : 'hover:bg-coral-dark'"
+                      class="text-xs bg-coral text-white px-3 py-1 rounded-md font-medium transition-all"
+                      :title="!hasBrief ? 'Generate your workspace brief first — discovery uses its industry field' : 'Refresh discovery (~30s, ~$0.02 per call)'">
+                <span x-show="!refreshing && lastRefreshed">Refresh</span>
+                <span x-show="!refreshing && !lastRefreshed">Discover</span>
+                <span x-show="refreshing">Working…</span>
+              </button>
+              <span class="text-[11px] text-charcoal-light cursor-help select-none"
+                    title="Discovery costs ~$0.02 per call (1 OpenAI web_search). Auto-runs after generating the workspace brief, plus every 90 days. Manual refresh forces a fresh run.">ⓘ</span>
+            </div>
+          </div>
+          <div class="p-3">
+            <p x-show="discovered.length === 0 && !refreshing" class="text-xs text-charcoal-light text-center py-6 italic">
+              No discovered domains yet.
+            </p>
+            <ul class="space-y-1.5">
+              <template x-for="d in discovered" :key="d.domain">
+                <li class="flex items-center gap-3 px-3 py-1.5 rounded-md hover:bg-gray-50 transition-colors">
+                  <span class="text-sm font-mono text-charcoal-dark truncate min-w-[180px] max-w-[260px]" x-text="d.domain"></span>
+                  <span class="text-xs text-charcoal-light flex-1 truncate" x-text="d.org || ''"></span>
+                  <span class="shrink-0 text-[9px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded"
+                        :class="typeChipClass(d.type)"
+                        x-text="d.type || 'reference'"></span>
+                </li>
+              </template>
+            </ul>
+          </div>
+        </div>
+
+        {/* Extras panel */}
+        <div class="bg-white rounded-xl shadow-sm border border-gray-100 mb-6 overflow-hidden">
+          <div class="px-5 py-3 border-b border-gray-100 flex items-baseline justify-between gap-3">
+            <h2 class="text-sm font-semibold text-charcoal-dark flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full bg-blue-500"></span>
+              <span>Extra domains</span>
+              <span class="text-charcoal-light text-xs font-normal">(<span x-text="extras.length"></span>)</span>
+            </h2>
+            <p class="text-[11px] text-charcoal-light italic">Preserved across refreshes</p>
+          </div>
+          <div class="p-3">
+            {/* Add input */}
+            <div class="flex items-center gap-2 mb-3 px-2">
+              <input type="text" x-model="newDomain" @keydown.enter="addExtra()"
+                     placeholder="e.g. example.org"
+                     :disabled="adding"
+                     class="flex-1 text-sm border border-gray-200 rounded-md px-3 py-1.5 outline-none focus:border-coral disabled:opacity-50" />
+              <button type="button" @click="addExtra()"
+                      :disabled="adding || !newDomain.trim()"
+                      :class="(adding || !newDomain.trim()) ? 'opacity-50 cursor-not-allowed' : 'hover:bg-coral-dark'"
+                      class="text-xs bg-coral text-white px-3 py-1.5 rounded-md font-medium transition-all">
+                <span x-show="!adding">Add</span>
+                <span x-show="adding">Adding…</span>
+              </button>
+            </div>
+            <p x-show="addError" class="text-xs text-red-600 mb-2 px-2" x-text="addError"></p>
+
+            <p x-show="extras.length === 0" class="text-xs text-charcoal-light text-center py-6 italic">
+              No extra domains yet. Add one above if the discovered list misses a source you trust.
+            </p>
+            <ul class="space-y-1">
+              <template x-for="d in extras" :key="d">
+                <li class="group flex items-center gap-3 px-3 py-1.5 rounded-md hover:bg-gray-50 transition-colors">
+                  <span class="text-sm font-mono text-charcoal-dark flex-1 truncate" x-text="d"></span>
+                  <span class="shrink-0 text-[9px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">User</span>
+                  <button type="button" @click="removeExtra(d)"
+                          :disabled="removing[d]"
+                          class="w-6 h-6 rounded text-charcoal-light hover:bg-red-100 hover:text-red-600 opacity-0 group-hover:opacity-100 disabled:opacity-30 transition-all flex items-center justify-center"
+                          title="Remove from extras">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                  </button>
+                </li>
+              </template>
+            </ul>
+          </div>
+        </div>
+      </div>
+    )}
+  </div>
+
+  <script is:inline>
+    document.addEventListener('alpine:init', () => {
+      window.Alpine.data('trustSources', (initial, clientId, hasBrief) => ({
+        clientId,
+        hasBrief,
+        discovered: (initial.details || []).slice(),
+        extras: (initial.extra_domains || []).slice(),
+        industryText: initial.industry_text || '',
+        lastRefreshed: initial.discovered_at || null,
+        refreshing: false,
+        adding: false,
+        addError: '',
+        newDomain: '',
+        removing: {},
+        pollHandle: null,
+
+        get lastRefreshedLabel() {
+          if (!this.lastRefreshed) return '';
+          try {
+            const d = new Date(this.lastRefreshed);
+            const now = new Date();
+            const days = Math.floor((now - d) / (1000 * 60 * 60 * 24));
+            if (days === 0) return 'today';
+            if (days === 1) return 'yesterday';
+            if (days < 30) return days + ' days ago';
+            return d.toISOString().slice(0, 10);
+          } catch { return this.lastRefreshed.slice(0, 10); }
+        },
+
+        typeChipClass(t) {
+          switch ((t || '').toLowerCase()) {
+            case 'authority': return 'bg-emerald-50 text-emerald-700';
+            case 'society':   return 'bg-indigo-50 text-indigo-700';
+            case 'journal':   return 'bg-amber-50 text-amber-700';
+            case 'research':  return 'bg-violet-50 text-violet-700';
+            case 'reference':
+            default:          return 'bg-gray-100 text-charcoal-light';
+          }
+        },
+
+        async refresh() {
+          if (this.refreshing) return;
+          if (!this.hasBrief) {
+            alert('Generate your workspace brief first — discovery uses its industry field.');
+            return;
+          }
+          this.refreshing = true;
+          const previousAt = this.lastRefreshed || '';
+          try {
+            const res = await fetch(
+              `/api/clients/${this.clientId}/trust-sources/discover?force=true`,
+              { method: 'POST', headers: { 'Content-Type': 'application/json' } }
+            );
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.detail?.message || err.detail || ('HTTP ' + res.status));
+            }
+            // Poll until discovered_at advances
+            const start = Date.now();
+            const poll = async () => {
+              if (Date.now() - start > 90000) {
+                this.refreshing = false;
+                alert('Refresh taking longer than expected — reload in a moment.');
+                return;
+              }
+              try {
+                const r = await fetch(`/api/clients/${this.clientId}/trust-sources`);
+                if (r.ok) {
+                  const data = await r.json();
+                  const ts = data.trust_sources || {};
+                  if (ts.discovered_at && ts.discovered_at !== previousAt) {
+                    this.discovered = (ts.details || []).slice();
+                    this.extras = (ts.extra_domains || []).slice();
+                    this.industryText = ts.industry_text || '';
+                    this.lastRefreshed = ts.discovered_at;
+                    this.refreshing = false;
+                    return;
+                  }
+                }
+              } catch {}
+              this.pollHandle = setTimeout(poll, 2500);
+            };
+            this.pollHandle = setTimeout(poll, 3000);
+          } catch (e) {
+            this.refreshing = false;
+            alert('Refresh failed : ' + e.message);
+          }
+        },
+
+        async addExtra() {
+          const raw = (this.newDomain || '').trim();
+          if (!raw || this.adding) return;
+          this.adding = true;
+          this.addError = '';
+          try {
+            const res = await fetch(
+              `/api/clients/${this.clientId}/trust-sources/extra-domains`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ domain: raw }),
+              }
+            );
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.detail?.message || err.detail || ('HTTP ' + res.status));
+            }
+            const data = await res.json();
+            this.extras = (data.extra_domains || []).slice();
+            this.newDomain = '';
+          } catch (e) {
+            this.addError = e.message;
+          } finally {
+            this.adding = false;
+          }
+        },
+
+        async removeExtra(domain) {
+          if (this.removing[domain]) return;
+          this.removing[domain] = true;
+          try {
+            const res = await fetch(
+              `/api/clients/${this.clientId}/trust-sources/extra-domains/${encodeURIComponent(domain)}`,
+              { method: 'DELETE' }
+            );
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.detail?.message || err.detail || ('HTTP ' + res.status));
+            }
+            const data = await res.json();
+            this.extras = (data.extra_domains || []).slice();
+          } catch (e) {
+            alert('Remove failed : ' + e.message);
+          } finally {
+            delete this.removing[domain];
+          }
+        },
+      }));
+    });
+  </script>
+</DashboardLayout>
