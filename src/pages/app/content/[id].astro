@@ -264,17 +264,15 @@ function fmtDate(iso: string | null): string {
             <div class="sm:col-span-2">
               <dt class="text-[10px] uppercase tracking-wide text-charcoal-light flex items-center gap-2">
                 <span>Target page</span>
-                {/* Phase D : surface the matcher's confidence + source. */}
-                <template x-if="item.target_url_source === 'sitemap_index' && item.target_url_score != null">
+                {/* Phase D : surface the matcher's confidence + source.
+                    Hide source chips when the top-3 picker is visible — the
+                    cards self-explain and the chip duplicates info. */}
+                <template x-if="(item.target_url_candidates || []).length < 2 && item.target_url_source === 'sitemap_index' && item.target_url_score != null">
                   <span class="text-[9px] font-mono px-1.5 py-0.5 rounded"
                         :class="item.target_url_score >= 0.8 ? 'bg-emerald-50 text-emerald-700' : (item.target_url_score >= 0.6 ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-800')"
-                        :title="'Semantic match score (cosine × authority × gamme bias). ≥0.55 floor; 1.0 max practical.'">
-                    Confidence <span x-text="Math.round(item.target_url_score * 100)"></span>
+                        :title="'How well this page matches your question (cosine similarity on the indexed page content, weighted by the page authority).'">
+                    Match <span x-text="Math.round(item.target_url_score * 100)"></span>%
                   </span>
-                </template>
-                <template x-if="item.target_url_source === 'auto_suggest'">
-                  <span class="text-[9px] text-gray-400 italic"
-                        title="Picked by web_search fallback — no sitemap-index match cleared the 55 threshold.">Web-search match</span>
                 </template>
               </dt>
               {/* Banner shown only when URL not yet set — Aesthetic-Usability + Tesler */}
@@ -290,40 +288,55 @@ function fmtDate(iso: string | null): string {
                   in 1 click instead of guessing. Active candidate gets emerald
                   ring + ★. "Use this →" on another card PATCHes target_url,
                   source auto-flips to user_input (audit signal). The plain URL
-                  input below stays editable for free-form override (Postel). */}
+                  input below stays editable for free-form override (Postel).
+                  Header line explains provenance + scoring so the numbers
+                  inside the cards aren't cryptic (UX feedback 2026-05-14). */}
               <template x-if="(item.target_url_candidates || []).length >= 2">
-                <div class="mt-1 mb-3 grid grid-cols-1 md:grid-cols-3 gap-2"
-                     :title="'Top ' + item.target_url_candidates.length + ' candidates from your sitemap index — click Use this to switch.'">
-                  <template x-for="c in item.target_url_candidates" :key="c.url">
-                    <div class="relative p-2.5 rounded-lg border transition-all flex flex-col gap-1"
-                         :class="c.url === item.target_url ? 'border-emerald-400 ring-2 ring-emerald-100 bg-emerald-50/50' : 'border-gray-200 bg-white hover:border-coral/40 hover:shadow-sm'">
-                      <span x-show="c.url === item.target_url"
-                            class="absolute top-1 right-2 text-emerald-600 text-sm leading-none"
-                            title="Currently selected">★</span>
-                      <a :href="c.url" target="_blank" rel="noopener"
-                         :title="c.url"
-                         class="text-[10px] font-mono text-charcoal-light hover:text-coral truncate block leading-tight"
-                         x-text="pickerShortUrl(c.url)"></a>
-                      <p class="text-xs font-medium text-charcoal-dark line-clamp-2 leading-snug"
-                         :title="c.title || c.url"
-                         x-text="c.title || c.url"></p>
-                      <div class="flex items-center justify-between mt-auto pt-1 gap-2">
-                        <span class="text-[10px] text-charcoal-light font-mono whitespace-nowrap">
-                          <span x-text="Math.round(c.score * 100)"></span>
-                          <span x-show="c.inlink_count > 0" class="text-charcoal-light/60"
-                                :title="c.inlink_count + ' internal inlinks — hub page authority signal'">
-                            · <span x-text="c.inlink_count"></span>↗
+                <div class="mt-1 mb-3">
+                  <div class="flex items-center gap-1.5 mb-1.5 text-[11px] text-charcoal-light">
+                    <svg class="w-3.5 h-3.5 text-coral" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
+                    </svg>
+                    <span><strong class="text-charcoal-dark">Top 3 suggestions from your sitemap</strong> · pages we indexed on your brand's site that semantically match your question</span>
+                    <span class="cursor-help select-none ml-0.5"
+                          title="How it's computed:&#10;&#10;• Match % = how close the page content is to your question (semantic embedding similarity)&#10;&#10;• 🔗 backlinks = how many OTHER pages on your site link to this page — a hub-page authority signal that gives the page a small score boost (the more inlinks, the more 'canonical' the page is for SEO)&#10;&#10;Source: built from your sitemap.xml. Refresh in Settings → Brand sitemaps if your pages have changed.">ⓘ</span>
+                  </div>
+                  <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
+                    <template x-for="c in item.target_url_candidates" :key="c.url">
+                      <div class="relative p-2.5 rounded-lg border transition-all flex flex-col gap-1"
+                           :class="c.url === item.target_url ? 'border-emerald-400 ring-2 ring-emerald-100 bg-emerald-50/50' : 'border-gray-200 bg-white hover:border-coral/40 hover:shadow-sm'">
+                        <span x-show="c.url === item.target_url"
+                              class="absolute top-1 right-2 text-emerald-600 text-sm leading-none"
+                              title="Currently selected">★</span>
+                        <a :href="c.url" target="_blank" rel="noopener"
+                           :title="c.url"
+                           class="text-[10px] font-mono text-charcoal-light hover:text-coral truncate block leading-tight"
+                           x-text="pickerShortUrl(c.url)"></a>
+                        <p class="text-xs font-medium text-charcoal-dark line-clamp-2 leading-snug"
+                           :title="c.title || c.url"
+                           x-text="c.title || c.url"></p>
+                        <div class="flex items-center justify-between mt-auto pt-1 gap-2 flex-wrap">
+                          <span class="text-[10px] inline-flex items-center gap-1.5">
+                            <span class="font-semibold text-charcoal-dark"
+                                  :title="'Match score — higher means the page content is closer to your question'">
+                              Match <span x-text="Math.round(c.score * 100)"></span>%
+                            </span>
+                            <span x-show="c.inlink_count > 0"
+                                  class="text-charcoal-light/80"
+                                  :title="c.inlink_count + ' other pages on your site link to this page — strong hub-page signal'">
+                              · 🔗 <span x-text="c.inlink_count"></span>
+                            </span>
                           </span>
-                        </span>
-                        <button @click="usePickerCandidate(c)"
-                                x-show="c.url !== item.target_url"
-                                :disabled="saving"
-                                class="text-[10px] text-coral hover:text-coral-dark font-semibold whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed">
-                          Use this →
-                        </button>
+                          <button @click="usePickerCandidate(c)"
+                                  x-show="c.url !== item.target_url"
+                                  :disabled="saving"
+                                  class="text-[10px] text-coral hover:text-coral-dark font-semibold whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed">
+                            Use this →
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  </template>
+                    </template>
+                  </div>
                 </div>
               </template>
               <dd class="mt-0.5 space-y-1">
