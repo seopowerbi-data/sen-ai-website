@@ -765,7 +765,11 @@ async def list_brand_pages(
 
     return {
         "ok": True,
-        "brand": {"id": str(brand.id), "name": brand.name, "domain": brand.domain},
+        "brand": {
+            "id": str(brand.id), "name": brand.name, "domain": brand.domain,
+            "locale_path_prefix": brand.locale_path_prefix,
+            "sitemap_urls_override": list(brand.sitemap_urls_override or []),
+        },
         "stats": {
             "total": total,
             "by_status": by_status,

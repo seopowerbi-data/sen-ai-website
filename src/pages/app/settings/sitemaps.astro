@@ -89,6 +89,8 @@ if (clientId) {
             stats: data.stats || {},
             in_flight_job: data.in_flight_job || null,
             pages: data.pages || [],
+            locale_path_prefix: data.brand?.locale_path_prefix || null,
+            sitemap_urls_override: data.brand?.sitemap_urls_override || [],
           };
         }
       } catch {}
@@ -154,9 +156,21 @@ if (clientId) {
                     (<span x-text="(brand.stats.total || 0)"></span> pages)
                   </span>
                 </h2>
-                <p class="text-[11px] text-charcoal-light mt-0.5 flex items-center gap-2">
+                <p class="text-[11px] text-charcoal-light mt-0.5 flex items-center gap-2 flex-wrap">
                   <span x-show="brand.domain" class="font-mono" x-text="brand.domain"></span>
                   <span x-show="!brand.domain" class="text-amber-700">No domain set</span>
+                  {/* Persistent locale filter chip — visible at-a-glance signal that
+                      this brand has a non-default sitemap config. */}
+                  <span x-show="brand.locale_path_prefix"
+                        class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-mono text-[10px]"
+                        :title="`Crawling only URLs containing ${brand.locale_path_prefix}`">
+                    <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 010 20M12 2a15 15 0 000 20"/></svg>
+                    <span x-text="brand.locale_path_prefix"></span>
+                  </span>
+                  <span x-show="brand.sitemap_urls_override && brand.sitemap_urls_override.length > 0"
+                        class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-mono text-[10px]"
+                        :title="`Crawler uses ${brand.sitemap_urls_override.length} user-specified sitemap URL(s) instead of auto-discovery`"
+                        x-text="`${brand.sitemap_urls_override.length} sitemap URL${brand.sitemap_urls_override.length === 1 ? '' : 's'} (override)`"></span>
                   <span x-show="brand.stats.last_crawled_at" class="text-charcoal-light/70">
                     · last crawl <span x-text="formatRelative(brand.stats.last_crawled_at)"></span>
                   </span>
@@ -195,7 +209,7 @@ if (clientId) {
                   <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
                 </svg>
                 <span class="font-medium">Sitemap configuration</span>
-                <span x-show="(cfgPrefix[brand.id] || '').trim() || (cfgUrls[brand.id] || '').trim()"
+                <span x-show="brand.locale_path_prefix || (brand.sitemap_urls_override && brand.sitemap_urls_override.length > 0) || (cfgPrefix[brand.id] || '').trim() || (cfgUrls[brand.id] || '').trim()"
                       class="text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">Custom</span>
               </button>
               <div x-show="configOpen[brand.id]" x-transition.opacity class="px-5 py-4 border-t border-gray-100 bg-gray-50/40">
@@ -227,21 +241,38 @@ if (clientId) {
                               class="w-full text-sm text-charcoal-dark border border-gray-200 rounded-md px-3 py-2 outline-none focus:border-coral font-mono disabled:opacity-50 bg-white"></textarea>
                   </div>
                   <p x-show="cfgError[brand.id]" class="text-xs text-red-600" x-text="cfgError[brand.id]"></p>
-                  <div class="flex items-center gap-2">
-                    <button type="button" @click="saveConfig(brand)"
+                  {/* Combined Save & Refresh CTA — clearer intent than two separate buttons.
+                      When config is dirty, primary action is "Save & Refresh". When clean,
+                      plain "Save config" lets the user re-save without crawling (no-op cost). */}
+                  <div class="flex items-center gap-3">
+                    <button type="button" @click="saveAndRefresh(brand)"
                             :disabled="!!savingCfg[brand.id]"
                             :class="savingCfg[brand.id] ? 'opacity-50 cursor-not-allowed' : 'hover:bg-coral-dark'"
-                            class="text-xs bg-coral text-white px-3 py-1.5 rounded-md font-medium transition-all">
-                      <span x-show="!savingCfg[brand.id] && !cfgDirty[brand.id]">Save config</span>
-                      <span x-show="!savingCfg[brand.id] && cfgDirty[brand.id]" class="font-semibold">Save changes *</span>
+                            class="text-xs bg-coral text-white px-3 py-1.5 rounded-md font-semibold transition-all inline-flex items-center gap-1.5">
+                      <svg x-show="!savingCfg[brand.id]" class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                      </svg>
+                      <svg x-show="savingCfg[brand.id]" class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" class="opacity-25"></circle><path d="M4 12a8 8 0 018-8" stroke="currentColor" stroke-width="4" class="opacity-75"></path></svg>
+                      <span x-show="!savingCfg[brand.id]">Save & Refresh sitemap</span>
                       <span x-show="savingCfg[brand.id]">Saving…</span>
                     </button>
-                    <span x-show="cfgSaved[brand.id]" class="text-[11px] text-emerald-600 inline-flex items-center gap-1">
-                      <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
-                      Saved · click <strong>Refresh sitemap</strong> to re-crawl with the new config
-                    </span>
+                    <button type="button" @click="saveConfig(brand)"
+                            x-show="cfgDirty[brand.id] && !savingCfg[brand.id]"
+                            class="text-[11px] text-charcoal-light hover:text-coral underline">
+                      Save without re-crawling
+                    </button>
                     <span x-show="cfgDirty[brand.id] && !savingCfg[brand.id] && !cfgSaved[brand.id]"
-                          class="text-[11px] text-amber-700 italic">Unsaved changes</span>
+                          class="text-[11px] text-amber-700 italic inline-flex items-center gap-1">
+                      <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                      Unsaved changes
+                    </span>
+                  </div>
+                  {/* Persistent confirmation banner — full-width so it's not lost in the
+                      controls row. Shows for 8s after save (longer than the prior 4s). */}
+                  <div x-show="cfgSaved[brand.id]" x-transition
+                       class="mt-2 px-3 py-2 rounded bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 inline-flex items-center gap-2">
+                    <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                    <span>Config saved <span x-show="cfgSavedRefreshed[brand.id]">· crawl re-queued with the new config</span></span>
                   </div>
                 </div>
               </div>
@@ -428,7 +459,20 @@ if (clientId) {
 
   <script is:inline>
     document.addEventListener('alpine:init', () => {
-      window.Alpine.data('sitemapsPage', (initialBrands, clientId) => ({
+      window.Alpine.data('sitemapsPage', (initialBrands, clientId) => {
+        // Pre-populate per-brand config state from the SSR payload so the
+        // "CUSTOM" badge + textarea/input contents are visible immediately,
+        // without waiting for the user to open the config panel and trigger
+        // a GET /sitemap-config round-trip.
+        const cfgPrefix = {};
+        const cfgUrls = {};
+        const cfgLoaded = {};
+        for (const b of (initialBrands || [])) {
+          cfgPrefix[b.id] = b.locale_path_prefix || '';
+          cfgUrls[b.id] = (b.sitemap_urls_override || []).join('\n');
+          cfgLoaded[b.id] = true;  // already loaded from SSR — skip lazy GET
+        }
+        return {
         clientId,
         brands: initialBrands || [],
         refreshing: {},        // {brand_id: bool}
@@ -439,12 +483,13 @@ if (clientId) {
         pollHandles: {},       // {brand_id: timeoutHandle}
         // Sitemap config panel state (Phase D multi-locale)
         configOpen: {},        // {brand_id: bool}
-        cfgPrefix: {},         // {brand_id: string}
-        cfgUrls: {},           // {brand_id: string (textarea)}
-        cfgLoaded: {},         // {brand_id: bool} — has the config been fetched once
+        cfgPrefix,             // pre-populated from SSR
+        cfgUrls,               // pre-populated from SSR
+        cfgLoaded,             // pre-populated from SSR
         savingCfg: {},         // {brand_id: bool}
         cfgError: {},          // {brand_id: string}
         cfgSaved: {},          // {brand_id: bool} — fades after a few seconds
+        cfgSavedRefreshed: {}, // {brand_id: bool} — Refresh was chained after save
         cfgDirty: {},          // {brand_id: bool} — true when user has typed since last save
         // View-pages panel state
         pagesOpen: {},         // {brand_id: bool}
@@ -602,13 +647,38 @@ if (clientId) {
             this.cfgPrefix[brand.id] = data.locale_path_prefix || '';
             this.cfgUrls[brand.id] = (data.sitemap_urls_override || []).join('\n');
             this.cfgDirty[brand.id] = false;
+            this.cfgSavedRefreshed[brand.id] = false;
             this.cfgSaved[brand.id] = true;
-            setTimeout(() => { this.cfgSaved[brand.id] = false; }, 4000);
+            // Mirror the saved state onto the brand object so the persistent
+            // header chip ("/fr-fr/" + "N sitemap URLs (override)") reflects
+            // the new config immediately, without a page reload.
+            const idx = this.brands.findIndex(b => b.id === brand.id);
+            if (idx >= 0) {
+              this.brands[idx] = {
+                ...this.brands[idx],
+                locale_path_prefix: data.locale_path_prefix || null,
+                sitemap_urls_override: data.sitemap_urls_override || [],
+              };
+            }
+            setTimeout(() => { this.cfgSaved[brand.id] = false; }, 8000);
           } catch (e) {
             this.cfgError[brand.id] = e.message;
           } finally {
             this.savingCfg[brand.id] = false;
           }
+        },
+
+        async saveAndRefresh(brand) {
+          // Combined CTA : save the config, then immediately enqueue a
+          // crawl_brand_sitemap so the user doesn't have to chase the
+          // Refresh button as a second step. Refresh is skipped only if
+          // the brand has no domain — saveConfig would have surfaced an
+          // error in that case anyway.
+          await this.saveConfig(brand);
+          if (this.cfgError[brand.id]) return;       // save failed → don't crawl
+          if (!brand.domain) return;
+          this.cfgSavedRefreshed[brand.id] = true;
+          await this.refresh(brand);
         },
 
         async refresh(brand) {
@@ -682,7 +752,8 @@ if (clientId) {
             this.removing[url] = false;
           }
         },
-      }));
+      };
+      });
     });
   </script>
 </DashboardLayout>
