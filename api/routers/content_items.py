@@ -61,13 +61,11 @@ PRIORITY_RANK = {"critique": 0, "haute": 1, "moyenne": 2}
 
 
 def _check_client_access(client_id: str, user, db: Session):
-    """Lightweight client-level RBAC for the Kanban list endpoint."""
-    link = db.query(UserClient).filter(
-        UserClient.user_id == user.id,
-        UserClient.client_id == client_id,
-    ).first()
-    if not link:
-        raise HTTPException(403, "Access denied")
+    """Phase E.C : delegate to services.access.check_client_access.
+    Method-aware ; raises 403 on no access or insufficient role for
+    destructive methods."""
+    from services.access import check_client_access
+    check_client_access(client_id, user, db)
 
 
 def _resolve_scan_brand_groups(scan_id: str, db: Session) -> dict[str, list[str]]:

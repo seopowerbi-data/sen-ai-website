@@ -54,20 +54,14 @@ def _verify_state(token: str) -> dict:
 
 
 def _check_client_access(user, client_id: str, db: Session, require_role: str = "editor"):
-    """Verify the user has at least `require_role` on the client.
-
-    Hierarchy: owner > editor > viewer.
-    """
-    link = db.query(UserClient).filter(
-        UserClient.user_id == user.id,
-        UserClient.client_id == client_id,
-    ).first()
-    if not link:
+    """Phase E.C : delegate to services.access. Different signature kept
+    for call-site compatibility (oauth callers pass require_role)."""
+    from services.access import get_user_client_role, require_role as _req
+    role = get_user_client_role(client_id, user, db)
+    if role is None:
         raise HTTPException(403, "Access denied to this client")
-    role_order = {"owner": 3, "editor": 2, "viewer": 1}
-    if role_order.get(link.role, 0) < role_order.get(require_role, 2):
-        raise HTTPException(403, f"Requires {require_role} role (your role: {link.role})")
-    return link
+    _req(role, minimum=require_role)
+    return role
 
 
 # ── Authorize ────────────────────────────────────────────────────────

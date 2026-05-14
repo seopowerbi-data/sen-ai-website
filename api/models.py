@@ -40,11 +40,56 @@ class Client(Base):
     # Cross-scan persistent default for content promotion (FAQ / Article generation).
     # See migration 019 + worker/services/brand_resolver.py for resolution chain.
     primary_brand_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True)
+    # Phase E.C — owning organization. Nullable for legacy rows but the
+    # migration 029 backfill populated every existing client.
+    organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="SET NULL"))
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user_links = relationship("UserClient", back_populates="client")
     subscriptions = relationship("Subscription", back_populates="client")
     api_keys = relationship("ClientApiKey", back_populates="client")
+    organization = relationship("Organization", back_populates="clients")
+
+
+class Organization(Base):
+    """Agency / workspace top-level entity. Phase E.C — see migration 029."""
+    __tablename__ = "organizations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(Text, nullable=False)
+    slug = Column(Text, unique=True)
+    is_personal = Column(Boolean, nullable=False, default=False)
+    branding = Column(JSONB, nullable=False, default=dict)
+    pool_billing = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    clients = relationship("Client", back_populates="organization")
+    members = relationship("OrganizationUser", back_populates="organization", cascade="all, delete-orphan")
+
+
+class OrganizationUser(Base):
+    """Org-level membership (Phase E.C). Per-client roles live in OrgUserClient."""
+    __tablename__ = "organization_users"
+
+    organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), primary_key=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    role = Column(Text, nullable=False, default="member")
+        # 'owner' | 'admin' | 'member'
+    invited_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
+    joined_at = Column(DateTime, default=datetime.utcnow)
+
+    organization = relationship("Organization", back_populates="members")
+
+
+class OrgUserClient(Base):
+    """Per-client access within an org (Phase E.C). Drop-in replacement
+    for UserClient.role once services/access.py is fully wired."""
+    __tablename__ = "org_user_clients"
+
+    organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), primary_key=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"), primary_key=True)
+    role = Column(Text, nullable=False)  # 'viewer' | 'editor' | 'owner'
 
 
 class UserClient(Base):

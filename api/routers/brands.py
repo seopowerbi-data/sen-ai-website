@@ -28,22 +28,12 @@ class BrandUpdate(BaseModel):
 
 
 def _check_client_access(client_id: str, user, db: Session):
-    """H6: viewer can read, editor+ can write. HTTP method comes from
-    `current_request_method` contextvar set by middleware in main.py."""
-    link = db.query(UserClient).filter(
-        UserClient.user_id == user.id, UserClient.client_id == client_id,
-    ).first()
-    if not link:
-        raise HTTPException(403, "Access denied")
-    method = current_request_method.get()
-    if method in _DESTRUCTIVE_METHODS:
-        rank = _ROLE_RANK.get(link.role, -1)
-        if rank < _ROLE_RANK["editor"]:
-            raise HTTPException(
-                403,
-                f"Insufficient role: '{link.role}' cannot {method} brands "
-                f"(requires 'editor' or 'owner')",
-            )
+    """Thin wrapper over services.access.check_client_access (Phase E.C).
+
+    Kept under the legacy name so existing call sites don't need to change.
+    """
+    from services.access import check_client_access
+    check_client_access(client_id, user, db)
 
 
 def _serialize_brand(b: ClientBrand) -> dict:

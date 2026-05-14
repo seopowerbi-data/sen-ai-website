@@ -20,21 +20,14 @@ _DESTRUCTIVE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 def _check_client_access(client_id: str, user, db: Session):
-    """Same role-gate pattern as brands.py:_check_client_access."""
-    link = db.query(UserClient).filter(
-        UserClient.user_id == user.id, UserClient.client_id == client_id,
-    ).first()
-    if not link:
-        raise HTTPException(403, "Access denied")
-    method = current_request_method.get()
-    if method in _DESTRUCTIVE_METHODS:
-        rank = _ROLE_RANK.get(link.role, -1)
-        if rank < _ROLE_RANK["editor"]:
-            raise HTTPException(
-                403,
-                f"Insufficient role: '{link.role}' cannot {method} client settings "
-                f"(requires 'editor' or 'owner')",
-            )
+    """Thin wrapper over services.access.check_client_access (Phase E.C).
+
+    Kept under the legacy name so existing call sites don't need to change.
+    Centralized helper reads Organization + UserClient (legacy fallback)
+    and surfaces consistent 403 messages.
+    """
+    from services.access import check_client_access
+    check_client_access(client_id, user, db)
 
 
 class ClientResponse(BaseModel):
