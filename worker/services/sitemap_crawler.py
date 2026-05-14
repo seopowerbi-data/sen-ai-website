@@ -491,15 +491,71 @@ def is_robots_allowed(url: str, user_agent: str = _USER_AGENT) -> bool:
     return rp.can_fetch(user_agent, url)
 
 
+def _extract_internal_links(soup: "BeautifulSoup", base_url: str, brand_host: str) -> list[str]:
+    """Return same-host absolute URLs from every <a href> on the page.
+
+    Used by Day 3's `compute_inlinks_from_map` to count internal inbound
+    links per page (an authority signal for the matcher's scoring).
+
+    Filtering rules :
+      - skip empty href, mailto:, tel:, javascript:, #fragment-only
+      - resolve relative paths against `base_url`
+      - keep only links whose host matches `brand_host` (with optional
+        www. prefix on either side) — external links go to other domains
+        and aren't part of this brand's index
+      - dedup by canonical URL (case-insensitive host, fragment stripped)
+      - cap at 500 unique edges per page to bound memory on link-farm
+        pages
+    """
+    if not soup or not base_url or not brand_host:
+        return []
+    from urllib.parse import urljoin, urlparse
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if not href:
+            continue
+        low = href.lower()
+        if low.startswith(("mailto:", "tel:", "javascript:", "#")):
+            continue
+        try:
+            abs_url = urljoin(base_url, href)
+            parsed = urlparse(abs_url)
+        except ValueError:
+            continue
+        host = (parsed.hostname or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host != brand_host:
+            continue
+        # Strip fragment, lowercase host segment of the URL
+        clean = parsed._replace(fragment="")
+        # Reconstruct without trailing canonicalization of path — the
+        # matcher's _normalize_url handles that for the count step
+        from urllib.parse import urlunparse
+        canon = urlunparse(clean).lower().split("#", 1)[0]
+        if canon in seen:
+            continue
+        seen.add(canon)
+        out.append(canon)
+        if len(out) >= 500:
+            break
+    return out
+
+
 def fetch_page_meta(
     url: str,
     if_modified_since: datetime | None = None,
     client: httpx.Client | None = None,
+    brand_host: str | None = None,
 ) -> dict:
     """Fetch one page and extract the metadata Day 3's matcher needs.
 
     Returns a dict with the following keys (always present, may be None) :
         title, meta_description, h1, body_excerpt, lang, canonical,
+        internal_links (list[str] | None — only when brand_host is given),
         http_status, redirected_to, fetch_error
 
     Semantics :
@@ -515,6 +571,11 @@ def fetch_page_meta(
     `client` is optional — pass a shared httpx.Client for connection pooling
     across many fetches in the same handler run. If absent we create a
     one-shot client.
+
+    `brand_host` (Day 3) opts the caller into internal-link extraction.
+    When provided, `internal_links` is populated with the same-host
+    absolute URLs found on the page (capped 500). When None we skip the
+    link scan to save CPU on callers that only need the metadata.
     """
     result = {
         "title": None,
@@ -523,6 +584,7 @@ def fetch_page_meta(
         "body_excerpt": None,
         "lang": None,
         "canonical": None,
+        "internal_links": None,
         "http_status": None,
         "redirected_to": None,
         "fetch_error": None,
@@ -617,6 +679,16 @@ def fetch_page_meta(
 
         # Body excerpt (300 words from main/article/body, structural noise stripped)
         result["body_excerpt"] = extract_body_excerpt(html) or None
+
+        # Internal links (Day 3 — only when caller asks for the inlink pass)
+        if brand_host:
+            try:
+                result["internal_links"] = _extract_internal_links(
+                    soup, final_url, brand_host.lower(),
+                )
+            except Exception as exc:
+                logger.info(f"internal_links extract failed for {url}: {exc}")
+                result["internal_links"] = []
 
         return result
     finally:

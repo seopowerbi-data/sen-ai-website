@@ -1,7 +1,8 @@
 """Handler: fetch every pending / stale page in client_brand_pages and
-populate title / meta / h1 / body_excerpt / content_hash.
+populate title / meta / h1 / body_excerpt / content_hash, AND collect
+the internal-link map for the post-fetch inlink-count pass.
 
-Phase D, Day 2. Picks up where crawl_brand_sitemap left off : rows in
+Phase D, Day 2+3. Picks up where crawl_brand_sitemap left off : rows in
 status='pending_fetch' (newly discovered) plus stale 'embedded' rows
 whose lastmod is newer than last_crawled_at OR which haven't been
 re-crawled in > 30 days.
@@ -34,11 +35,22 @@ Throttle: 1 request/sec/domain (plan default; configurable via payload
 for power users). Periodic commits every 50 rows so a worker crash mid-
 loop doesn't lose progress.
 
+Day 3 addition : `fetch_page_meta` now receives `brand_host` so it can
+extract every same-host `<a href>` from the page. The handler accumulates
+{source_url -> outgoing_urls} in memory, then calls
+`sitemap_matcher.compute_inlinks_from_map` at the end to bulk-update
+`internal_inlink_count` (which feeds the matcher's authority boost).
+Finally, when at least one row was newly fetched the handler chains
+`embed_brand_pages`.
+
 Payload :
     {
         "client_brand_id": str,
         "max_pages": int (optional cap for smoke testing),
         "throttle_seconds": float (optional, default 1.0),
+        "force_refetch": bool (optional, default False — re-fetches
+            every selected row even when content_hash is unchanged,
+            used to backfill internal-link maps on pre-Day-3 corpora),
     }
 
 Returns :
@@ -73,6 +85,7 @@ from services.sitemap_crawler import (
     is_robots_allowed,
     is_soft_404,
 )
+from services.sitemap_matcher import compute_inlinks_from_map
 
 logger = logging.getLogger(__name__)
 
@@ -105,17 +118,23 @@ def _compute_content_hash(title, meta, h1, body_excerpt) -> str:
 
 
 def _select_pending_rows(
-    db: Session, client_brand_id: str, max_pages: int | None
+    db: Session, client_brand_id: str, max_pages: int | None,
+    force_refetch: bool = False,
 ):
     """Pull every row that needs fetching, oldest-first.
 
-    Selection :
+    Default selection :
       - status='pending_fetch'                                    (newly discovered)
       - status='embedded' AND lastmod > last_crawled_at           (CMS says changed)
       - status='embedded' AND last_crawled_at < now - 30d         (stale refresh)
 
     Rows in status='error' / 'gone' are excluded — error retries happen
     via a separate manual re-enqueue (plan: surface in Settings UI).
+
+    `force_refetch=True` widens the selection to every row in
+    ('pending_fetch', 'fetched', 'embedded') and turns OFF the content_hash
+    short-circuit in the loop. Use sparingly — drives the Day-3 inlink
+    backfill on pre-Day-3 corpora.
     """
     from models import ClientBrandPage
 
@@ -124,8 +143,12 @@ def _select_pending_rows(
 
     q = (
         db.query(ClientBrandPage)
-        .filter(
-            ClientBrandPage.client_brand_id == client_brand_id,
+        .filter(ClientBrandPage.client_brand_id == client_brand_id)
+    )
+    if force_refetch:
+        q = q.filter(ClientBrandPage.status.in_(("pending_fetch", "fetched", "embedded")))
+    else:
+        q = q.filter(
             or_(
                 ClientBrandPage.status == "pending_fetch",
                 and_(
@@ -140,13 +163,23 @@ def _select_pending_rows(
                         ClientBrandPage.last_crawled_at < stale_cutoff,
                     ),
                 ),
-            ),
+            )
         )
-        .order_by(ClientBrandPage.first_seen_at.asc())
-    )
+    q = q.order_by(ClientBrandPage.first_seen_at.asc())
     if max_pages:
         q = q.limit(int(max_pages))
     return q.all()
+
+
+def _normalize_brand_host(domain: str) -> str:
+    """Same shape as the API validator — strip scheme/www/trailing slash."""
+    if not domain:
+        return ""
+    import re as _re
+    d = _re.sub(r"^https?://", "", (domain or "").strip().lower())
+    if d.startswith("www."):
+        d = d[4:]
+    return d.split("/", 1)[0].strip().rstrip(".")
 
 
 def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
@@ -158,6 +191,7 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
 
     throttle = float((job_payload or {}).get("throttle_seconds") or 1.0)
     max_pages = (job_payload or {}).get("max_pages")
+    force_refetch = bool((job_payload or {}).get("force_refetch"))
 
     brand = db.query(ClientBrand).filter(ClientBrand.id == client_brand_id).first()
     if not brand:
@@ -175,7 +209,8 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
             "remaining_retry": 0,
         }
 
-    rows = _select_pending_rows(db, client_brand_id, max_pages)
+    brand_host = _normalize_brand_host(domain)
+    rows = _select_pending_rows(db, client_brand_id, max_pages, force_refetch=force_refetch)
     if not rows:
         logger.info(
             f"fetch_brand_pages: no pending or stale rows for {brand.name} "
@@ -193,7 +228,7 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
 
     logger.info(
         f"fetch_brand_pages start: {brand.name} ({domain}) "
-        f"rows={len(rows)} throttle={throttle}s"
+        f"rows={len(rows)} throttle={throttle}s force_refetch={force_refetch}"
     )
 
     fetched = 0
@@ -203,6 +238,10 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
     blocked_by_robots = 0
     remaining_retry = 0
     consecutive_errors = 0
+    # Internal-link map (Day 3) : source_url -> list[same-host outgoing URLs].
+    # Collected during the fetch loop, consumed at the end by
+    # compute_inlinks_from_map.
+    links_map: dict[str, list[str]] = {}
 
     with httpx.Client(
         headers={
@@ -237,10 +276,15 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
             if i > 0 and throttle > 0:
                 time.sleep(throttle)
 
+            # Day 3 : pass brand_host to opt into internal-link extraction.
+            # On force_refetch we also bypass the conditional-GET so we get
+            # a full 200 + HTML body to parse links from (a 304 returns no
+            # body and our link map would stay empty for that row).
             meta = fetch_page_meta(
                 row.url,
-                if_modified_since=row.last_crawled_at,
+                if_modified_since=None if force_refetch else row.last_crawled_at,
                 client=client,
+                brand_host=brand_host,
             )
 
             row.last_crawled_at = now
@@ -272,12 +316,20 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
 
             consecutive_errors = 0
 
-            # 304 Not Modified : nothing to update
+            # 304 Not Modified : nothing to update in DB; can't update
+            # links_map either (no body returned). Bump last_crawled_at only.
             if meta["http_status"] == 304:
                 unchanged += 1
                 if (i + 1) % _COMMIT_EVERY == 0:
                     db.commit()
                 continue
+
+            # We have a full 200-OK fetch — record the internal links
+            # regardless of whether content changed. The Day 3 inlink pass
+            # needs them even on unchanged content (the brand's link
+            # architecture can shift without the page text changing).
+            if meta.get("internal_links") is not None:
+                links_map[row.url] = meta["internal_links"]
 
             # Soft-404 : 200 OK but the page is a "not found" placeholder
             if is_soft_404(meta["title"], meta["body_excerpt"]):
@@ -293,9 +345,14 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
                 meta["h1"], meta["body_excerpt"],
             )
 
-            if row.content_hash == new_hash and row.status in ("fetched", "embedded"):
+            hash_changed = (row.content_hash != new_hash)
+
+            if (not force_refetch and not hash_changed
+                    and row.status in ("fetched", "embedded")):
                 # Content unchanged AND we already have it indexed — skip
-                # the re-embed cost on Day 3. Just bumping last_crawled_at.
+                # the re-embed cost. Just bumping last_crawled_at. (links_map
+                # was already populated above, so the inlink pass still sees
+                # this page's outgoing edges.)
                 unchanged += 1
                 if (i + 1) % _COMMIT_EVERY == 0:
                     db.commit()
@@ -310,8 +367,15 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
             row.content_hash = new_hash
             row.fetch_error = None
             row.fetch_retry_count = 0
-            row.status = "fetched"
-            fetched += 1
+            # Only flip status to 'fetched' (triggers re-embed) when the
+            # content actually changed OR we're filling a pending_fetch row
+            # for the first time. On force_refetch with same content the
+            # row stays 'embedded' so we don't waste re-embed cost.
+            if hash_changed or row.status == "pending_fetch":
+                row.status = "fetched"
+                fetched += 1
+            else:
+                unchanged += 1
 
             if (i + 1) % _COMMIT_EVERY == 0:
                 db.commit()
@@ -325,18 +389,65 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
 
     attempted = fetched + unchanged + soft_404 + errors + blocked_by_robots + remaining_retry
 
+    # Day 3 : compute internal_inlink_count from the links collected during
+    # this run. Only fires when we actually have a map (skipped on empty
+    # runs to avoid pointlessly zeroing every row).
+    inlinks_summary = None
+    if links_map:
+        try:
+            inlinks_summary = compute_inlinks_from_map(
+                str(client_brand_id), links_map, db,
+            )
+        except Exception:
+            db.rollback()
+            logger.exception(
+                f"compute_inlinks_from_map failed for {brand.name} — "
+                f"continuing without authority signal"
+            )
+
     logger.info(
         f"fetch_brand_pages done for {brand.name} ({domain}): "
         f"attempted={attempted} fetched={fetched} unchanged={unchanged} "
         f"soft_404={soft_404} errors={errors} "
-        f"blocked_by_robots={blocked_by_robots} remaining_retry={remaining_retry}"
+        f"blocked_by_robots={blocked_by_robots} remaining_retry={remaining_retry} "
+        f"inlinks_summary={inlinks_summary}"
     )
 
-    # NOTE: Day 3 will append a chain enqueue of embed_brand_pages here.
-    logger.info(
-        f"Chain target on Day 3: enqueue embed_brand_pages for "
-        f"client_brand_id={client_brand_id} ({fetched} rows now in 'fetched')"
-    )
+    # Day 3 chain : enqueue embed_brand_pages when there are rows in
+    # status='fetched' (newly extracted or force-refetched). The embed
+    # handler is itself idempotent — it picks up only rows where embedding
+    # IS NULL or embedding_model differs from the current constant.
+    embed_job_id: str | None = None
+    if fetched > 0:
+        from models import ClientBrandPage, Job
+        # Skip enqueue if a job already in flight for this brand
+        in_flight = (
+            db.query(Job)
+            .filter(
+                Job.client_id == brand.client_id,
+                Job.job_type == "embed_brand_pages",
+                Job.status.in_(("pending", "running")),
+                Job.payload["client_brand_id"].astext == str(client_brand_id),
+            )
+            .first()
+        )
+        if in_flight:
+            embed_job_id = str(in_flight.id)
+        else:
+            embed_job = Job(
+                client_id=brand.client_id,
+                job_type="embed_brand_pages",
+                status="pending",
+                payload={"client_brand_id": str(client_brand_id)},
+                max_attempts=2,
+            )
+            db.add(embed_job)
+            db.commit()
+            embed_job_id = str(embed_job.id)
+        logger.info(
+            f"Chained embed_brand_pages job {embed_job_id} for "
+            f"client_brand_id={client_brand_id}"
+        )
 
     return {
         "client_brand_id": str(client_brand_id),
@@ -350,4 +461,6 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
         "errors": errors,
         "blocked_by_robots": blocked_by_robots,
         "remaining_retry": remaining_retry,
+        "inlinks_summary": inlinks_summary,
+        "chained_embed_job_id": embed_job_id,
     }
