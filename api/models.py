@@ -169,6 +169,47 @@ class ClientBrand(Base):
     parent = relationship("ClientBrand", remote_side=[id])
 
 
+class ClientBrandPage(Base):
+    """Sitemap-discovered page for a client_brand domain.
+
+    Phase D — see migration 025_client_brand_pages.sql for the lifecycle
+    diagram and column semantics. One row per URL on a primary brand's
+    sitemap; embedding (1536 floats, JSONB) is filled by embed_brand_pages
+    and queried by sitemap_matcher to suggest target_url for FAQ items.
+    """
+
+    __tablename__ = "client_brand_pages"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    client_brand_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("client_brands.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    url = Column(Text, nullable=False)
+    url_canonical = Column(Text)
+    title = Column(Text)
+    meta_description = Column(Text)
+    h1 = Column(Text)
+    body_excerpt = Column(Text)
+    lang = Column(Text)
+    lastmod = Column(DateTime)
+    content_hash = Column(Text)
+    internal_inlink_count = Column(Integer, nullable=False, default=0)
+    embedding = Column(JSONB)
+    embedding_model = Column(Text)
+    status = Column(Text, nullable=False, default="pending_fetch")
+        # pending_fetch | fetched | embedded | gone | error
+    fetch_error = Column(Text)
+    fetch_retry_count = Column(Integer, nullable=False, default=0)
+    http_status = Column(Integer)
+    first_seen_at = Column(DateTime, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, default=datetime.utcnow)
+    last_crawled_at = Column(DateTime)
+    last_embedded_at = Column(DateTime)
+    gone_since = Column(DateTime)
+
+
 class Scan(Base):
     __tablename__ = "scans"
 
@@ -348,9 +389,15 @@ class ScanContentItem(Base):
     target_page_title = Column(String(500))
     target_question = Column(Text)
     # Provenance of target_url — drives Kanban "Needs URL" badge + validation UI.
-    # Values: scan_result | pending_user | user_input | auto_suggest (Phase D).
-    # See api/migrations/020_target_url_source.sql for semantics.
+    # Values: scan_result | pending_user | user_input | auto_suggest | sitemap_index.
+    # See api/migrations/020_target_url_source.sql + 026_target_url_score_and_candidates.sql.
     target_url_source = Column(Text)
+    # Sitemap matcher final score (cosine × authority × gamme bias) for target_url.
+    # NULL when no sitemap match available. Migration 026.
+    target_url_score = Column(Float)
+    # Top-3 sitemap matcher picks [{"url","title","score"}] — drives top-3 picker UX.
+    # Migration 026.
+    target_url_candidates = Column(JSONB, nullable=False, default=list)
 
     # Content
     content_html = Column(Text)

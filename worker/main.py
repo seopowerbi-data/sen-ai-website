@@ -82,7 +82,8 @@ def load_handlers():
                           detect_competitors, generate_opportunities, cleanup_brands,
                           generate_domain_brief, generate_client_brief,
                           generate_faq, materialize_content_items,
-                          rematch_target_url, discover_trust_sources)  # noqa: F401
+                          rematch_target_url, discover_trust_sources,
+                          crawl_brand_sitemap)  # noqa: F401
     HANDLERS["fetch_keywords"] = fetch_keywords.execute
     HANDLERS["classify_topics"] = classify_topics.execute
     HANDLERS["assign_keywords"] = assign_keywords.execute
@@ -99,6 +100,7 @@ def load_handlers():
     HANDLERS["materialize_content_items"] = materialize_content_items.execute
     HANDLERS["rematch_target_url"] = rematch_target_url.execute
     HANDLERS["discover_trust_sources"] = discover_trust_sources.execute
+    HANDLERS["crawl_brand_sitemap"] = crawl_brand_sitemap.execute
 
 
 # Job types that operate on a single content item (one FAQ / article / …)
