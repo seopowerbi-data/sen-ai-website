@@ -348,8 +348,19 @@ function fmtDate(iso: string | null): string {
                        :disabled="item.status === 'published' || item.status === 'rejected'"
                        class="w-full text-sm border rounded px-2 py-1.5 focus:outline-none focus:border-coral disabled:bg-gray-50 disabled:text-gray-500"
                        :class="urlValidation().borderClass" />
-                {/* Inline validation hint (client-side, Doherty <400ms) — Postel + Aesthetic-Usability */}
-                <template x-if="item.target_url && urlValidation().message">
+                {/* Inline validation hint (client-side, Doherty <400ms) — Postel + Aesthetic-Usability.
+                    UX clean-up : when the message is the routine "Looks good"
+                    success, render a compact ✓ icon-line. Warnings/errors keep
+                    their full text (high-signal information stays visible). */}
+                <template x-if="item.target_url && urlValidation().message && urlValidation().level === 'ok'">
+                  <p class="text-[10px] leading-snug inline-flex items-center gap-1"
+                     :class="urlValidation().textClass"
+                     :title="urlValidation().message">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                    <span x-text="urlValidation().shortMessage || urlValidation().message"></span>
+                  </p>
+                </template>
+                <template x-if="item.target_url && urlValidation().message && urlValidation().level !== 'ok'">
                   <p class="text-[11px] leading-snug" :class="urlValidation().textClass" x-text="urlValidation().message"></p>
                 </template>
                 <div class="flex items-center gap-3 flex-wrap">
@@ -392,7 +403,11 @@ function fmtDate(iso: string | null): string {
                   <template x-if="rematchError">
                     <span class="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded px-2 py-0.5" x-text="rematchError"></span>
                   </template>
-                  <template x-if="item.target_url_source === 'auto_suggest'">
+                  {/* Auto-suggest chip — only meaningful when the picker
+                      cards aren't already saying "system suggested these".
+                      Hidden when ≥2 candidates render (picker is the
+                      stronger affordance — Aesthetic-Usability). */}
+                  <template x-if="item.target_url_source === 'auto_suggest' && (item.target_url_candidates || []).length < 2">
                     <span class="text-[10px] text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded">
                       ✨ Auto-suggested — review & edit if needed
                     </span>
@@ -412,7 +427,7 @@ function fmtDate(iso: string | null): string {
                       ✏ Set by you
                     </span>
                   </template>
-                  <template x-if="item.target_url_source === 'scan_result'">
+                  <template x-if="item.target_url_source === 'scan_result' && (item.target_url_candidates || []).length < 2">
                     <span class="text-[10px] text-gray-500">
                       From scan results
                     </span>
@@ -666,21 +681,23 @@ function fmtDate(iso: string | null): string {
 
           <template x-if="item.promoted_brand_names && item.promoted_brand_names.length > 0">
             <div class="space-y-1.5">
+              {/* Two-tier list (UX clean-up 2026-05-14) :
+                   Tier 1 — always visible : LEAD (idx=0) + brands actually
+                            mentioned in the content. These are the user's
+                            'wins' or 'about-to-set' choices.
+                   Tier 2 — collapsed by default : non-LEAD brands with 0
+                            mentions. Hidden behind a 'Show N more brands' toggle.
+                            Click to expand → all star toggles are still
+                            available so the user can promote any of them to
+                            LEAD even when collapsed by default. */}
               <template x-for="(name, idx) in item.promoted_brand_names" :key="name">
-                <div class="flex items-center gap-2 group/brandrow">
+                <div x-show="idx === 0 || (brandMentionCounts()[name] || 0) > 0 || showAllPromotedBrands"
+                     class="flex items-center gap-2 group/brandrow">
                   <span class="w-5 h-5 rounded-full bg-coral text-white text-[10px] font-bold flex items-center justify-center flex-shrink-0" x-text="idx + 1"></span>
-                  {/* Star toggle — Gate 3 mirror.
-                       Lead row : filled ★ yellow, no action (already lead).
-                       Other rows : outline ☆ gray, click to promote.
-                       Locked when canEditLead() is false (approved/published). */}
                   <template x-if="idx === 0">
                     <span class="text-yellow-400 text-base leading-none shrink-0"
                           title="LEAD brand for this content item">★</span>
                   </template>
-                  {/* Auto-suggested LEAD chip — visible on the LEAD row only,
-                       only when the materialize handler auto-picked this brand
-                       and the user hasn't overridden yet. Disappears on first
-                       override (server flips lead_suggestion.source → 'user'). */}
                   <template x-if="idx === 0 && isAutoLead()">
                     <span class="text-[9px] uppercase tracking-wide font-semibold px-1 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-100 shrink-0"
                           :title="autoLeadTooltip()">Auto</span>
@@ -693,8 +710,6 @@ function fmtDate(iso: string | null): string {
                             :title="canEditLead() ? ('Make ' + name + ' the LEAD for this item. Your workspace default stays the same.') : 'Locked — lead can only be changed before the item is approved.'">☆</button>
                   </template>
                   <span class="text-xs text-charcoal-dark flex-1 truncate" x-text="name"></span>
-                  {/* Per-brand mention count : 0 = amber tag (promotion missed),
-                       1+ = emerald chip (Goal-Gradient achievement signal). */}
                   <template x-if="(brandMentionCounts()[name] || 0) === 0">
                     <span class="text-[9px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5"
                           title="Not mentioned in the current content — consider editing to weave this brand in.">0 mentions</span>
@@ -706,6 +721,25 @@ function fmtDate(iso: string | null): string {
                   </template>
                   <span x-show="idx === 0" class="text-[9px] uppercase tracking-wide text-coral font-bold">lead</span>
                 </div>
+              </template>
+              {/* Expand / collapse toggle — appears only when there are non-LEAD
+                   brands with 0 mentions to hide. Aesthetic-Usability : reduce
+                   noise by default, keep affordance one click away. */}
+              <template x-if="unmentionedNonLeadCount() > 0">
+                <button type="button"
+                        @click="showAllPromotedBrands = !showAllPromotedBrands"
+                        class="text-[11px] text-charcoal-light hover:text-coral inline-flex items-center gap-1 mt-1 transition-colors"
+                        :title="showAllPromotedBrands ? 'Hide brands with no mention' : 'Show all brands (including those not mentioned in the current content)'">
+                  <svg class="w-3 h-3 transition-transform"
+                       :class="showAllPromotedBrands ? 'rotate-180' : ''"
+                       fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+                  </svg>
+                  <span x-show="!showAllPromotedBrands">
+                    Show <span x-text="unmentionedNonLeadCount()"></span> brand<span x-show="unmentionedNonLeadCount() > 1">s</span> not mentioned
+                  </span>
+                  <span x-show="showAllPromotedBrands">Hide brands not mentioned</span>
+                </button>
               </template>
               <template x-if="leadSaving">
                 <p class="text-[10px] text-charcoal-light italic mt-1">Saving new lead…</p>
@@ -974,6 +1008,7 @@ function fmtDate(iso: string | null): string {
         // Per-item LEAD picker state (Brand promotion star toggle).
         leadSaving: false,
         leadJustChanged: null,  // brand name : shows the "rematch URL" banner
+        showAllPromotedBrands: false,  // expand non-LEAD 0-mention brands
 
         statusLabelOf(s) {
           const m = { identified: 'IDENTIFIED', generating: 'GENERATING', draft: 'DRAFT', in_review: 'IN REVIEW', approved: 'APPROVED', published: 'PUBLISHED', rejected: 'REJECTED' };
@@ -1125,6 +1160,10 @@ function fmtDate(iso: string | null): string {
             message: matchesBrand === null
               ? '✓ Deep page detected. Add primary brands in workspace settings to enable on-brand check.'
               : '✓ Looks good — deep page on your brand domain.',
+            // shortMessage is the compact label used by the icon-line variant
+            // when the result is positive — keeps the chrome quiet, full text
+            // surfaces in the title tooltip.
+            shortMessage: 'Valid deep page on your brand',
             borderClass: 'border-emerald-200',
             textClass: 'text-emerald-700',
           };
@@ -1346,6 +1385,19 @@ function fmtDate(iso: string | null): string {
             out[name] = m ? m.length : 0;
           }
           return out;
+        },
+        // Count of non-LEAD promoted brands that have 0 mentions in the
+        // current content. Drives the 'Show N more brands not mentioned'
+        // expand toggle in the Brand promotion panel.
+        unmentionedNonLeadCount() {
+          const names = this.item.promoted_brand_names || [];
+          if (names.length < 2) return 0;
+          const counts = this.brandMentionCounts();
+          let n = 0;
+          for (let i = 1; i < names.length; i++) {
+            if ((counts[names[i]] || 0) === 0) n++;
+          }
+          return n;
         },
         // Competitor leak detection : count occurrences of each competitor
         // brand in the rendered content. Any count > 0 is a leak signal
