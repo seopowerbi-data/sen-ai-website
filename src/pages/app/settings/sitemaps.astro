@@ -209,7 +209,8 @@ if (clientId) {
                     <input type="text"
                            x-init="$el.value = cfgPrefix[brand.id] || ''"
                            x-effect="if (document.activeElement !== $el) $el.value = cfgPrefix[brand.id] || ''"
-                           @input="cfgPrefix[brand.id] = $event.target.value"
+                           @input="cfgPrefix[brand.id] = $event.target.value; cfgDirty[brand.id] = true"
+                           @blur="if (cfgDirty[brand.id]) saveConfig(brand)"
                            :placeholder="brand.domain ? '/fr-fr/' : 'Set domain first'"
                            :disabled="!brand.domain || !!savingCfg[brand.id]"
                            class="w-48 text-sm text-charcoal-dark border border-gray-200 rounded-md px-3 py-1.5 outline-none focus:border-coral font-mono disabled:opacity-50 bg-white" />
@@ -218,7 +219,8 @@ if (clientId) {
                     <label class="block text-[10px] uppercase tracking-wide font-semibold text-charcoal-light mb-1">Sitemap URLs (override, one per line)</label>
                     <textarea x-init="$el.value = cfgUrls[brand.id] || ''"
                               x-effect="if (document.activeElement !== $el) $el.value = cfgUrls[brand.id] || ''"
-                              @input="cfgUrls[brand.id] = $event.target.value"
+                              @input="cfgUrls[brand.id] = $event.target.value; cfgDirty[brand.id] = true"
+                              @blur="if (cfgDirty[brand.id]) saveConfig(brand)"
                               :placeholder="brand.domain ? `https://www.${brand.domain.replace(/^www\\./,'')}/fr-fr/site.xml\nhttps://www.${brand.domain.replace(/^www\\./,'')}/fr-fr/product.xml` : ''"
                               :disabled="!brand.domain || !!savingCfg[brand.id]"
                               rows="4"
@@ -227,13 +229,19 @@ if (clientId) {
                   <p x-show="cfgError[brand.id]" class="text-xs text-red-600" x-text="cfgError[brand.id]"></p>
                   <div class="flex items-center gap-2">
                     <button type="button" @click="saveConfig(brand)"
-                            :disabled="savingCfg[brand.id]"
+                            :disabled="!!savingCfg[brand.id]"
                             :class="savingCfg[brand.id] ? 'opacity-50 cursor-not-allowed' : 'hover:bg-coral-dark'"
                             class="text-xs bg-coral text-white px-3 py-1.5 rounded-md font-medium transition-all">
-                      <span x-show="!savingCfg[brand.id]">Save config</span>
+                      <span x-show="!savingCfg[brand.id] && !cfgDirty[brand.id]">Save config</span>
+                      <span x-show="!savingCfg[brand.id] && cfgDirty[brand.id]" class="font-semibold">Save changes *</span>
                       <span x-show="savingCfg[brand.id]">Saving…</span>
                     </button>
-                    <span x-show="cfgSaved[brand.id]" class="text-[11px] text-emerald-600">Saved · click Refresh to re-crawl with the new config</span>
+                    <span x-show="cfgSaved[brand.id]" class="text-[11px] text-emerald-600 inline-flex items-center gap-1">
+                      <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                      Saved · click <strong>Refresh sitemap</strong> to re-crawl with the new config
+                    </span>
+                    <span x-show="cfgDirty[brand.id] && !savingCfg[brand.id] && !cfgSaved[brand.id]"
+                          class="text-[11px] text-amber-700 italic">Unsaved changes</span>
                   </div>
                 </div>
               </div>
@@ -437,6 +445,7 @@ if (clientId) {
         savingCfg: {},         // {brand_id: bool}
         cfgError: {},          // {brand_id: string}
         cfgSaved: {},          // {brand_id: bool} — fades after a few seconds
+        cfgDirty: {},          // {brand_id: bool} — true when user has typed since last save
         // View-pages panel state
         pagesOpen: {},         // {brand_id: bool}
         pageList: {},          // {brand_id: array of page objects}
@@ -592,6 +601,7 @@ if (clientId) {
             const data = await r.json();
             this.cfgPrefix[brand.id] = data.locale_path_prefix || '';
             this.cfgUrls[brand.id] = (data.sitemap_urls_override || []).join('\n');
+            this.cfgDirty[brand.id] = false;
             this.cfgSaved[brand.id] = true;
             setTimeout(() => { this.cfgSaved[brand.id] = false; }, 4000);
           } catch (e) {
