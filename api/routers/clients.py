@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from sqlalchemy.orm.attributes import flag_modified
 
-from models import Client, ClientBrand, ClientCredit, Job, ScanBrandClassification, UserClient, get_db
+from models import Client, ClientBrand, ClientBrandPage, ClientCredit, Job, ScanBrandClassification, UserClient, get_db
 from services.auth_service import get_current_user
 from services.request_context import current_request_method
 from services.sanitize import strip_tags
@@ -553,6 +553,404 @@ async def add_trust_source_extra(client_id: str, body: ExtraDomainBody,
     flag_modified(client, "apps")
     db.commit()
     return {"ok": True, "extra_domains": extras}
+
+
+# ─── Sitemap-index pages : per-brand crawl + manual URL escape hatch ──────
+# Phase D. Lets the user :
+#   - See the pages crawled from a brand's sitemap.xml + how many embedded
+#   - Trigger a manual refresh (re-runs crawl_brand_sitemap, which chains
+#     fetch_brand_pages and — Day 3 onward — embed_brand_pages)
+#   - Add a page manually when the sitemap is missing / incomplete. Manual
+#     rows enter the same fetch -> embed pipeline but are exempt from the
+#     sitemap-diff mark_gone branch (see migration 027).
+
+def _brand_for_client(brand_id: str, client_id: str, db: Session) -> ClientBrand:
+    """Resolve a brand belonging to a client, 404 otherwise.
+
+    Centralizes the access pattern : `_check_client_access` has already
+    enforced the user can touch this client_id, so a brand mismatch is a
+    not-found rather than a permission error.
+    """
+    brand = (
+        db.query(ClientBrand)
+        .filter(ClientBrand.id == brand_id, ClientBrand.client_id == client_id)
+        .first()
+    )
+    if not brand:
+        raise HTTPException(404, "Brand not found for this client")
+    return brand
+
+
+def _normalize_brand_host(domain: str) -> str:
+    """Strip scheme/path/www/trailing slash, lowercase."""
+    if not domain:
+        return ""
+    import re as _re
+    d = _re.sub(r"^https?://", "", (domain or "").strip().lower())
+    if d.startswith("www."):
+        d = d[4:]
+    return d.split("/", 1)[0].strip().rstrip(".")
+
+
+def _validate_manual_page_url(raw_url: str, brand: ClientBrand) -> str:
+    """Validate that a user-supplied URL is acceptable for this brand.
+
+    Rules :
+      - Must be https:// (we don't crawl http in v1 — sitemap_crawler tries
+        https only too, so this keeps the pipeline coherent)
+      - Hostname must match the brand's registered domain, with or without
+        the www. prefix on either side. This prevents an editor from
+        seeding URLs that point at unrelated sites (would pollute the
+        matcher corpus + leak the user's brand index across competitors)
+      - Must parse as a real URL — bare hostnames rejected
+      - Returns the canonical-form URL (no trailing slash on bare host,
+        scheme normalized to https, fragment stripped — fragments duplicate
+        the parent page in the index)
+
+    Raises HTTPException(400/422) with a structured error payload on
+    failure so the UI can render a precise message.
+    """
+    if not raw_url or not isinstance(raw_url, str):
+        raise HTTPException(400, {"error": "invalid_url", "message": "URL is required."})
+    raw_url = raw_url.strip()
+    if not raw_url:
+        raise HTTPException(400, {"error": "invalid_url", "message": "URL is required."})
+
+    from urllib.parse import urlparse, urlunparse
+    try:
+        parsed = urlparse(raw_url)
+    except ValueError:
+        raise HTTPException(400, {"error": "invalid_url", "message": "URL is malformed."})
+
+    if parsed.scheme not in ("https",):
+        raise HTTPException(
+            422,
+            {"error": "scheme_unsupported",
+             "message": "URL must start with https://. http is not crawled in v1."},
+        )
+    if not parsed.hostname:
+        raise HTTPException(400, {"error": "invalid_url", "message": "URL must include a host."})
+
+    brand_host = _normalize_brand_host(brand.domain or "")
+    if not brand_host:
+        raise HTTPException(
+            422,
+            {"error": "brand_domain_missing",
+             "message": "This brand has no registered domain. Set the brand domain in Settings → My primary brands first."},
+        )
+    url_host = parsed.hostname.lower()
+    if url_host.startswith("www."):
+        url_host = url_host[4:]
+    if url_host != brand_host:
+        raise HTTPException(
+            422,
+            {"error": "host_mismatch",
+             "message": f"URL host must be {brand_host} (got {parsed.hostname}). Manual pages can only point to the brand's own domain."},
+        )
+
+    # Strip fragment + normalize trailing slash on path-empty URLs to keep
+    # the dedup tight against the sitemap rows.
+    clean = parsed._replace(fragment="")
+    if clean.path == "":
+        clean = clean._replace(path="/")
+    return urlunparse(clean)
+
+
+@router.get("/{client_id}/brands/{brand_id}/pages")
+async def list_brand_pages(
+    client_id: str, brand_id: str,
+    source: str | None = None,   # 'sitemap' | 'manual' | None (all)
+    status: str | None = None,
+    limit: int = 200,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List indexed pages for a brand + summary stats.
+
+    Drives the Settings sitemaps card : the user sees the global counts
+    and (optionally) the manual-URLs list. Sitemap rows are large enough
+    to need pagination ; for the default UI we surface only manual rows
+    in detail (the user can't act on sitemap rows, only refresh).
+    """
+    _check_client_access(client_id, user, db)
+    brand = _brand_for_client(brand_id, client_id, db)
+
+    # Aggregate stats across the whole brand (no filter), one round-trip
+    from sqlalchemy import func
+    stats_rows = (
+        db.query(
+            ClientBrandPage.status,
+            ClientBrandPage.source,
+            func.count(ClientBrandPage.id).label("n"),
+            func.max(ClientBrandPage.last_seen_at).label("last_seen"),
+            func.max(ClientBrandPage.last_crawled_at).label("last_crawled"),
+        )
+        .filter(ClientBrandPage.client_brand_id == brand_id)
+        .group_by(ClientBrandPage.status, ClientBrandPage.source)
+        .all()
+    )
+    by_status: dict[str, int] = {}
+    by_source: dict[str, int] = {}
+    total = 0
+    last_seen_max = None
+    last_crawled_max = None
+    for r in stats_rows:
+        total += r.n
+        by_status[r.status] = by_status.get(r.status, 0) + r.n
+        by_source[r.source] = by_source.get(r.source, 0) + r.n
+        if r.last_seen and (last_seen_max is None or r.last_seen > last_seen_max):
+            last_seen_max = r.last_seen
+        if r.last_crawled and (last_crawled_max is None or r.last_crawled > last_crawled_max):
+            last_crawled_max = r.last_crawled
+
+    # Active crawl job — drives a "Refreshing..." pill in the UI
+    in_flight_crawl = (
+        db.query(Job)
+        .filter(
+            Job.client_id == client_id,
+            Job.job_type.in_(("crawl_brand_sitemap", "fetch_brand_pages")),
+            Job.status.in_(("pending", "running")),
+            Job.payload["client_brand_id"].astext == str(brand_id),
+        )
+        .order_by(Job.created_at.desc())
+        .first()
+    )
+
+    # Page list — bounded, default to manual rows (the ones the user can
+    # delete). Sitemap detail page can come later if needed.
+    q = (
+        db.query(ClientBrandPage)
+        .filter(ClientBrandPage.client_brand_id == brand_id)
+        .order_by(ClientBrandPage.first_seen_at.asc())
+    )
+    if source in ("manual", "sitemap"):
+        q = q.filter(ClientBrandPage.source == source)
+    elif source is None:
+        # Default to manual-only for the UI list (sitemap rows live in stats)
+        q = q.filter(ClientBrandPage.source == "manual")
+    if status:
+        q = q.filter(ClientBrandPage.status == status)
+    q = q.limit(max(1, min(int(limit), 500)))
+    page_rows = q.all()
+
+    return {
+        "ok": True,
+        "brand": {"id": str(brand.id), "name": brand.name, "domain": brand.domain},
+        "stats": {
+            "total": total,
+            "by_status": by_status,
+            "by_source": by_source,
+            "last_seen_at": last_seen_max.isoformat() if last_seen_max else None,
+            "last_crawled_at": last_crawled_max.isoformat() if last_crawled_max else None,
+        },
+        "in_flight_job": {
+            "id": str(in_flight_crawl.id),
+            "type": in_flight_crawl.job_type,
+            "status": in_flight_crawl.status,
+        } if in_flight_crawl else None,
+        "pages": [
+            {
+                "id": str(p.id),
+                "url": p.url,
+                "title": p.title,
+                "status": p.status,
+                "source": p.source,
+                "fetch_error": p.fetch_error,
+                "lastmod": p.lastmod.isoformat() if p.lastmod else None,
+                "last_crawled_at": p.last_crawled_at.isoformat() if p.last_crawled_at else None,
+            }
+            for p in page_rows
+        ],
+    }
+
+
+class ManualPageUrlBody(BaseModel):
+    url: str
+
+
+@router.post("/{client_id}/brands/{brand_id}/pages/manual")
+@limiter.limit("20/minute")
+async def add_manual_page(
+    request: Request, client_id: str, brand_id: str, body: ManualPageUrlBody,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Add a URL to the brand's page index. Goes into the fetch -> embed
+    pipeline like any sitemap-discovered row, but with source='manual'
+    so it survives sitemap diffs.
+
+    Enqueues a fetch_brand_pages job if one isn't already in flight for
+    this brand — same in-flight pattern as trust-sources discovery.
+    """
+    _check_client_access(client_id, user, db)
+    brand = _brand_for_client(brand_id, client_id, db)
+    canonical_url = _validate_manual_page_url(body.url, brand)
+
+    existing = (
+        db.query(ClientBrandPage)
+        .filter(
+            ClientBrandPage.client_brand_id == brand_id,
+            ClientBrandPage.url == canonical_url,
+        )
+        .first()
+    )
+    if existing:
+        # If it was previously sitemap-discovered then went gone, restore
+        # via the user's manual intent. Otherwise 409 — the row already
+        # exists and the user can see it in the list.
+        if existing.status == "gone":
+            existing.status = "pending_fetch"
+            existing.gone_since = None
+            existing.fetch_error = None
+            existing.fetch_retry_count = 0
+            existing.source = "manual"
+            db.commit()
+            _maybe_enqueue_fetch(client_id, brand_id, db)
+            return {
+                "ok": True, "url": canonical_url, "status": existing.status,
+                "source": "manual", "restored": True,
+            }
+        raise HTTPException(409, {
+            "error": "duplicate",
+            "message": f"This URL is already indexed (status={existing.status}, source={existing.source}).",
+        })
+
+    row = ClientBrandPage(
+        client_brand_id=brand_id,
+        url=canonical_url,
+        status="pending_fetch",
+        source="manual",
+    )
+    db.add(row)
+    db.commit()
+
+    _maybe_enqueue_fetch(client_id, brand_id, db)
+
+    return {
+        "ok": True, "url": canonical_url, "status": "pending_fetch",
+        "source": "manual", "restored": False,
+    }
+
+
+@router.delete("/{client_id}/brands/{brand_id}/pages/manual")
+async def delete_manual_page(
+    client_id: str, brand_id: str, body: ManualPageUrlBody,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Hard-delete a manual page. Sitemap-discovered rows cannot be
+    removed this way (would be re-inserted by the next crawl) — they
+    only leave the index via the natural gone -> purge_stale_pages flow.
+    """
+    _check_client_access(client_id, user, db)
+    _brand_for_client(brand_id, client_id, db)
+    target_url = (body.url or "").strip()
+    if not target_url:
+        raise HTTPException(400, "URL is required.")
+
+    row = (
+        db.query(ClientBrandPage)
+        .filter(
+            ClientBrandPage.client_brand_id == brand_id,
+            ClientBrandPage.url == target_url,
+        )
+        .first()
+    )
+    if not row:
+        raise HTTPException(404, "Page not found in this brand's index.")
+    if row.source != "manual":
+        raise HTTPException(
+            409,
+            {"error": "not_manual",
+             "message": "Only manually-added pages can be deleted. Sitemap-discovered "
+                        "pages must be removed from your sitemap.xml or wait for the "
+                        "30-day gone-purge cycle."},
+        )
+
+    db.delete(row)
+    db.commit()
+    return {"ok": True, "deleted": target_url}
+
+
+def _maybe_enqueue_fetch(client_id: str, brand_id: str, db: Session) -> str | None:
+    """Enqueue a fetch_brand_pages job iff none is already pending/running.
+
+    Mirrors the discover_trust_sources in-flight protection — a single
+    pending fetch will pick up every pending_fetch row at runtime, so
+    queueing more is wasted work."""
+    in_flight = (
+        db.query(Job)
+        .filter(
+            Job.client_id == client_id,
+            Job.job_type == "fetch_brand_pages",
+            Job.status.in_(("pending", "running")),
+            Job.payload["client_brand_id"].astext == str(brand_id),
+        )
+        .first()
+    )
+    if in_flight:
+        return str(in_flight.id)
+    job = Job(
+        client_id=client_id,
+        job_type="fetch_brand_pages",
+        status="pending",
+        payload={"client_brand_id": str(brand_id)},
+        max_attempts=2,
+    )
+    db.add(job)
+    db.commit()
+    return str(job.id)
+
+
+@router.post("/{client_id}/brands/{brand_id}/sitemap/refresh")
+@limiter.limit("3/minute")
+async def refresh_brand_sitemap(
+    request: Request, client_id: str, brand_id: str,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Manually trigger a sitemap re-crawl for one brand. Enqueues
+    crawl_brand_sitemap, which chains fetch_brand_pages on completion
+    (Day 2). In-flight protection : if a crawl is already pending /
+    running for this brand we return its job id."""
+    _check_client_access(client_id, user, db)
+    brand = _brand_for_client(brand_id, client_id, db)
+
+    in_flight = (
+        db.query(Job)
+        .filter(
+            Job.client_id == client_id,
+            Job.job_type == "crawl_brand_sitemap",
+            Job.status.in_(("pending", "running")),
+            Job.payload["client_brand_id"].astext == str(brand_id),
+        )
+        .first()
+    )
+    if in_flight:
+        return {
+            "ok": True, "job_id": str(in_flight.id),
+            "status": in_flight.status, "message": "Already in flight",
+        }
+
+    if not (brand.domain or "").strip():
+        raise HTTPException(
+            422,
+            {"error": "brand_domain_missing",
+             "message": "This brand has no registered domain — cannot crawl. "
+                        "Set it in Settings → My primary brands first."},
+        )
+
+    job = Job(
+        client_id=client_id,
+        job_type="crawl_brand_sitemap",
+        status="pending",
+        payload={"client_brand_id": str(brand_id)},
+        max_attempts=2,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return {"ok": True, "job_id": str(job.id), "status": "pending"}
 
 
 @router.delete("/{client_id}/trust-sources/extra-domains/{domain}")
