@@ -493,6 +493,16 @@ function fmtDate(iso: string | null): string {
                       title="The raw responses LLMs (ChatGPT, Gemini, ...) actually returned for this question in the original scan. Use this to see what content patterns and citations your FAQ needs to displace. Brand mentions are highlighted : coral = your brand, red = competitor.">ⓘ</span>
               </h2>
               <span class="text-[11px] text-charcoal-light italic ml-1">— what your FAQ is here to displace</span>
+              {/* Freshness chip — colored by age of the latest snapshot.
+                  Green if <7d, amber 7-30d, red >30d. Visible even when the
+                  panel is collapsed so the user knows up-front if the data
+                  is stale. Replaces the prior 'today' lie. */}
+              <span x-show="item.competitor_snapshot.latest_snapshot_at"
+                    class="text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0"
+                    :class="aiSnapshotAgeClass()"
+                    :title="'Latest LLM responses captured ' + aiSnapshotAgeLabel(true)">
+                AI snapshot · <span x-text="aiSnapshotAgeLabel(false)"></span>
+              </span>
               <template x-if="item.competitor_snapshot.competitor_brand_name">
                 <span class="ml-auto text-[10px] bg-red-50 text-red-700 px-1.5 py-0.5 rounded font-medium shrink-0">
                   Currently favors <strong x-text="item.competitor_snapshot.competitor_brand_name"></strong>
@@ -570,8 +580,31 @@ function fmtDate(iso: string | null): string {
                   </div>
                 </template>
               </div>
-              <p class="text-[11px] text-charcoal-light mt-3 italic">
-                Snapshot from the original scan. Re-run the scan to refresh these responses.
+              {/* Refresh action — re-calls the LLMs for THIS question only
+                  (~$0.04). Hard cap 5/24h to bound spend. Polls the item
+                  endpoint until the in_flight_refresh_job clears. */}
+              <div class="mt-4 pt-3 border-t border-gray-100 flex items-center gap-3 flex-wrap">
+                <button type="button"
+                        @click="refreshAiSnapshot()"
+                        :disabled="aiSnapshotRefreshing || (item.competitor_snapshot && item.competitor_snapshot.in_flight_refresh_job_id)"
+                        :class="(aiSnapshotRefreshing || (item.competitor_snapshot && item.competitor_snapshot.in_flight_refresh_job_id)) ? 'opacity-50 cursor-not-allowed' : 'hover:bg-coral-dark'"
+                        class="text-xs bg-coral text-white px-3 py-1.5 rounded-md font-medium transition-all inline-flex items-center gap-1.5">
+                  <svg class="w-3.5 h-3.5"
+                       :class="aiSnapshotRefreshing ? 'animate-spin' : ''"
+                       fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                  </svg>
+                  <span x-show="!aiSnapshotRefreshing && !(item.competitor_snapshot && item.competitor_snapshot.in_flight_refresh_job_id)">Refresh AI snapshot</span>
+                  <span x-show="aiSnapshotRefreshing || (item.competitor_snapshot && item.competitor_snapshot.in_flight_refresh_job_id)">Refreshing… (~30s)</span>
+                </button>
+                <span class="text-[11px] text-charcoal-light cursor-help select-none"
+                      title="Re-calls ChatGPT + Gemini on this question only (~$0.04, ~30s). The panel shows the latest snapshot per provider. Capped at 5 refreshes per 24h per question to bound spend.">ⓘ Cost ~$0.04 · 5 refreshes/24h max</span>
+                <span x-show="aiSnapshotRefreshError"
+                      class="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded px-2 py-0.5"
+                      x-text="aiSnapshotRefreshError"></span>
+              </div>
+              <p class="text-[11px] text-charcoal-light/80 mt-2 italic">
+                These responses come from the most recent LLM tests on this question. Click Refresh above to re-run them now.
               </p>
             </div>
           </section>
@@ -1128,6 +1161,9 @@ function fmtDate(iso: string | null): string {
         showAllPromotedBrands: false,  // expand non-LEAD 0-mention brands
         competitorPanelOpen: false,    // Pilier 5 — collapsed by default
         expandedCitations: {},          // {scan_llm_result_id: bool} — show all citations
+        aiSnapshotRefreshing: false,    // true between POST and completion poll
+        aiSnapshotRefreshError: '',
+        _aiSnapshotPollHandle: null,
 
         statusLabelOf(s) {
           const m = { identified: 'IDENTIFIED', generating: 'GENERATING', draft: 'DRAFT', in_review: 'IN REVIEW', approved: 'APPROVED', published: 'PUBLISHED', rejected: 'REJECTED' };
@@ -1505,6 +1541,81 @@ function fmtDate(iso: string | null): string {
           }
           return out;
         },
+        // Pilier 5 — freshness label / color for the AI snapshot chip.
+        // Computes from competitor_snapshot.latest_snapshot_at.
+        aiSnapshotAgeDays() {
+          const iso = this.item?.competitor_snapshot?.latest_snapshot_at;
+          if (!iso) return null;
+          const t = Date.parse(iso);
+          if (Number.isNaN(t)) return null;
+          return Math.floor((Date.now() - t) / 86_400_000);
+        },
+        aiSnapshotAgeLabel(verbose) {
+          const days = this.aiSnapshotAgeDays();
+          if (days === null) return '';
+          if (days <= 0) return verbose ? 'today (less than 24h ago)' : 'today';
+          if (days === 1) return verbose ? '1 day ago' : '1 day ago';
+          if (days < 7) return days + (verbose ? ' days ago' : 'd ago');
+          if (days < 30) {
+            const w = Math.floor(days / 7);
+            return w + (verbose ? ' week' + (w > 1 ? 's' : '') + ' ago' : 'w ago');
+          }
+          const m = Math.floor(days / 30);
+          return m + (verbose ? ' month' + (m > 1 ? 's' : '') + ' ago' : 'mo ago');
+        },
+        aiSnapshotAgeClass() {
+          const days = this.aiSnapshotAgeDays();
+          if (days === null) return 'bg-gray-100 text-charcoal-light';
+          if (days < 7) return 'bg-emerald-50 text-emerald-700';
+          if (days < 30) return 'bg-amber-50 text-amber-800';
+          return 'bg-red-50 text-red-700';
+        },
+
+        // Pilier 5 — POST refresh + poll until the worker completes.
+        async refreshAiSnapshot() {
+          if (this.aiSnapshotRefreshing) return;
+          this.aiSnapshotRefreshing = true;
+          this.aiSnapshotRefreshError = '';
+          try {
+            const res = await fetch(
+              '/api/content-items/' + this.item.id + '/refresh-ai-snapshot',
+              { method: 'POST', headers: { 'Content-Type': 'application/json' } }
+            );
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.detail?.message || err.detail || ('HTTP ' + res.status));
+            }
+            // Poll every 4s, refetch item until in_flight_refresh_job_id clears.
+            // Stop after 90s safety bound.
+            const startedAt = Date.now();
+            const tick = async () => {
+              try {
+                const r = await fetch('/api/content-items/' + this.item.id);
+                if (r.ok) {
+                  const data = await r.json();
+                  this.item = data;
+                  const stillRunning = data.competitor_snapshot && data.competitor_snapshot.in_flight_refresh_job_id;
+                  if (!stillRunning) {
+                    this.aiSnapshotRefreshing = false;
+                    this._aiSnapshotPollHandle = null;
+                    return;
+                  }
+                }
+              } catch {}
+              if (Date.now() - startedAt > 90_000) {
+                this.aiSnapshotRefreshing = false;
+                this.aiSnapshotRefreshError = 'Refresh taking longer than expected — reload the page in a moment.';
+                return;
+              }
+              this._aiSnapshotPollHandle = setTimeout(tick, 4_000);
+            };
+            this._aiSnapshotPollHandle = setTimeout(tick, 3_000);
+          } catch (e) {
+            this.aiSnapshotRefreshing = false;
+            this.aiSnapshotRefreshError = e.message;
+          }
+        },
+
         // Pilier 5 — citation labels. Gemini returns grounding-redirect URLs
         // (vertexaisearch.cloud.google.com/grounding-api-redirect/...) which
         // are opaque to the user. We surface the source domain when available

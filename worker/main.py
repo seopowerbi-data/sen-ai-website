@@ -84,7 +84,8 @@ def load_handlers():
                           generate_faq, materialize_content_items,
                           rematch_target_url, discover_trust_sources,
                           crawl_brand_sitemap, fetch_brand_pages,
-                          embed_brand_pages, purge_stale_pages)  # noqa: F401
+                          embed_brand_pages, purge_stale_pages,
+                          refresh_ai_snapshot)  # noqa: F401
     HANDLERS["fetch_keywords"] = fetch_keywords.execute
     HANDLERS["classify_topics"] = classify_topics.execute
     HANDLERS["assign_keywords"] = assign_keywords.execute
@@ -105,6 +106,7 @@ def load_handlers():
     HANDLERS["fetch_brand_pages"] = fetch_brand_pages.execute
     HANDLERS["embed_brand_pages"] = embed_brand_pages.execute
     HANDLERS["purge_stale_pages"] = purge_stale_pages.execute
+    HANDLERS["refresh_ai_snapshot"] = refresh_ai_snapshot.execute
 
 
 # Job types that operate on a single content item (one FAQ / article / …)

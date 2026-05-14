@@ -426,10 +426,31 @@ def _build_competitor_snapshot(item: ScanContentItem, db: Session) -> dict | Non
     if not question:
         return None
 
+    # Latest row per provider — refreshes append new rows tagged with a
+    # fresh created_at, the old rows linger in the table for the audit
+    # trail (and for Pilier 7's before/after delta). We only surface the
+    # MOST RECENT one per provider in the panel.
+    from sqlalchemy import and_
+    latest = (
+        db.query(
+            ScanLLMResult.provider,
+            func.max(ScanLLMResult.created_at).label("max_at"),
+        )
+        .filter(ScanLLMResult.question_id == question.id)
+        .group_by(ScanLLMResult.provider)
+        .subquery()
+    )
     llm_rows = (
         db.query(ScanLLMResult)
+        .join(
+            latest,
+            and_(
+                ScanLLMResult.provider == latest.c.provider,
+                ScanLLMResult.created_at == latest.c.max_at,
+            ),
+        )
         .filter(ScanLLMResult.question_id == question.id)
-        .order_by(ScanLLMResult.created_at.asc())
+        .order_by(ScanLLMResult.provider.asc())
         .all()
     )
     if not llm_rows:
@@ -456,10 +477,35 @@ def _build_competitor_snapshot(item: ScanContentItem, db: Session) -> dict | Non
     if not responses:
         return None
 
+    # Latest snapshot date across all providers — drives the freshness chip
+    # in the UI ('AI snapshot · 14 days ago'). Per-response timestamps stay
+    # in `responses[].created_at` for finer-grained display if needed.
+    latest_at = max(
+        (r.created_at for r in llm_rows if r.created_at),
+        default=None,
+    )
+
+    # Check if there's an in-flight refresh job for this item — UI uses
+    # this to disable the Refresh button and poll for completion.
+    in_flight_refresh_job = (
+        db.query(Job)
+        .filter(
+            Job.client_id == item.scan.client_id if item.scan else None,
+            Job.job_type == "refresh_ai_snapshot",
+            Job.status.in_(("pending", "running")),
+            Job.payload["item_id"].astext == str(item.id),
+        )
+        .order_by(Job.created_at.desc())
+        .first()
+    )
+
     return {
         "question_text": q_text,
         "competitor_brand_name": item.best_competitor,
         "competitor_position": None,  # not stored on item — could derive from llm rows
+        "latest_snapshot_at": latest_at.isoformat() if latest_at else None,
+        "scan_question_id": str(question.id),
+        "in_flight_refresh_job_id": str(in_flight_refresh_job.id) if in_flight_refresh_job else None,
         "responses": responses,
     }
 
@@ -906,3 +952,121 @@ async def rematch_target_url(item_id: str, user=Depends(get_current_user),
     )
 
     return {"ok": True, "job_id": str(job.id), "status": "pending"}
+
+
+# Phase E Pilier 5 — manual refresh of the AI snapshot.
+# 5 refreshes/24h/question. Each refresh = 2 LLM calls (~$0.04). Hard cap on
+# the day's count keeps spend bounded even if a user spam-clicks.
+REFRESH_AI_SNAPSHOT_MAX_PER_DAY = 5
+
+
+@router.post("/content-items/{item_id}/refresh-ai-snapshot")
+async def refresh_ai_snapshot(item_id: str, user=Depends(get_current_user),
+                               db: Session = Depends(get_db)):
+    """Re-run the LLM tests for THIS item's question.
+
+    Calls every configured provider (ChatGPT + Gemini today) on the single
+    question, stores fresh ScanLLMResult rows. The detail endpoint then
+    surfaces the latest row per provider in `competitor_snapshot`. ~$0.04
+    per refresh.
+
+    Capped at REFRESH_AI_SNAPSHOT_MAX_PER_DAY refreshes/24h/question
+    (counted via ScanLLMResult timestamps). In-flight protection blocks
+    double-enqueue.
+    """
+    from datetime import datetime, timedelta
+
+    item = (
+        db.query(ScanContentItem)
+        .options(joinedload(ScanContentItem.scan))
+        .filter(ScanContentItem.id == item_id)
+        .first()
+    )
+    if not item:
+        raise HTTPException(404, "Content item not found")
+
+    _check_scan_access(str(item.scan_id), user, db)
+
+    q_text = (item.target_question or "").strip()
+    if not q_text:
+        raise HTTPException(422, {
+            "error": "no_question",
+            "message": "This item has no target_question — nothing to refresh.",
+        })
+
+    question = (
+        db.query(ScanQuestion)
+        .filter(
+            ScanQuestion.scan_id == item.scan_id,
+            func.lower(ScanQuestion.question) == q_text.lower(),
+        )
+        .first()
+    )
+    if not question:
+        raise HTTPException(404, {
+            "error": "scan_question_not_found",
+            "message": "Couldn't link this item back to a ScanQuestion. The "
+                       "snapshot can't be refreshed — try editing the question "
+                       "text to match the original scan.",
+        })
+
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    recent_rows = (
+        db.query(ScanLLMResult)
+        .filter(
+            ScanLLMResult.question_id == question.id,
+            ScanLLMResult.created_at > cutoff,
+        )
+        .count()
+    )
+    approx_refreshes_done = max(0, (recent_rows // 2) - 1)
+    if approx_refreshes_done >= REFRESH_AI_SNAPSHOT_MAX_PER_DAY:
+        raise HTTPException(429, {
+            "error": "refresh_cap_reached",
+            "message": f"You've refreshed this AI snapshot {approx_refreshes_done} time(s) "
+                       f"in the last 24 hours (cap: {REFRESH_AI_SNAPSHOT_MAX_PER_DAY}). "
+                       f"Wait until tomorrow — or re-run the full scan if you need fresh "
+                       f"data on many questions at once.",
+            "refreshes_done": approx_refreshes_done,
+            "cap": REFRESH_AI_SNAPSHOT_MAX_PER_DAY,
+        })
+
+    in_flight = (
+        db.query(Job)
+        .filter(
+            Job.scan_id == item.scan_id,
+            Job.job_type == "refresh_ai_snapshot",
+            Job.status.in_(["pending", "running"]),
+        )
+        .all()
+    )
+    for j in in_flight:
+        if (j.payload or {}).get("item_id") == item_id:
+            return {
+                "ok": True, "job_id": str(j.id), "status": j.status,
+                "message": "Refresh already in flight",
+            }
+
+    job = Job(
+        scan_id=item.scan_id,
+        job_type="refresh_ai_snapshot",
+        status="pending",
+        payload={"item_id": item_id},
+        max_attempts=2,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    audit_log(
+        db, user_id=str(user.id),
+        action="content_item.refresh_ai_snapshot",
+        target_type="content_item", target_id=item_id,
+        details={
+            "job_id": str(job.id),
+            "scan_question_id": str(question.id),
+            "refreshes_done_last_24h": approx_refreshes_done,
+        },
+    )
+
+    return {"ok": True, "job_id": str(job.id), "status": "pending", "refreshes_done_last_24h": approx_refreshes_done, "cap": REFRESH_AI_SNAPSHOT_MAX_PER_DAY}
