@@ -58,6 +58,15 @@ STUCK_JOB_TIMEOUT_HOURS = 2
 CLEANUP_INTERVAL_SECONDS = 300  # run sweep at most every 5 min
 _LAST_CLEANUP_TS = 0.0
 
+# Phase E Pilier 7 — T+14 post-publish measurement loop.
+# Every hour we sweep for content items that were published ≥ N days ago and
+# haven't had a post-publish LLM measurement yet, and enqueue a
+# refresh_ai_snapshot job for each. The handler already exists (Pilier 5),
+# so this is purely an automated trigger.
+POST_PUBLISH_MEASUREMENT_DELAY_DAYS = 14
+POST_PUBLISH_SCAN_INTERVAL_SECONDS = 3600  # check at most every 1 hour
+_LAST_POST_PUBLISH_SCAN_TS = 0.0
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
@@ -344,6 +353,128 @@ def cleanup_stuck_jobs() -> None:
         db.close()
 
 
+def enqueue_post_publish_measurements() -> None:
+    """Sweep for items ripe for T+14 post-publish AI measurement (Pilier 7).
+
+    An item is ripe when :
+      - `published_at` is set (= user clicked Approve / published)
+      - `published_at` < now - POST_PUBLISH_MEASUREMENT_DELAY_DAYS
+      - No ScanLLMResult exists for the item's question after
+        `published_at + (delay - 1) days` (= we haven't already measured)
+      - No pending/running refresh_ai_snapshot job is in flight for this item
+
+    Each match enqueues a refresh_ai_snapshot job with `trigger='t14_post_publish'`
+    in the payload (informational — the handler is provider-agnostic to its
+    caller). Cost ≈ $0.04 per item.
+
+    No global rate cap : we expect 1 measurement per item per 14 days in
+    steady state, and the per-question 5/24h refresh cap already protects
+    against abuse if a user re-publishes the same item repeatedly.
+
+    Cheap no-op most of the time : runs at most every
+    POST_PUBLISH_SCAN_INTERVAL_SECONDS.
+    """
+    global _LAST_POST_PUBLISH_SCAN_TS
+    now = time.time()
+    if now - _LAST_POST_PUBLISH_SCAN_TS < POST_PUBLISH_SCAN_INTERVAL_SECONDS:
+        return
+    _LAST_POST_PUBLISH_SCAN_TS = now
+
+    db = SessionLocal()
+    try:
+        from models import ScanContentItem, ScanQuestion, ScanLLMResult, Job
+        from sqlalchemy import func
+
+        cutoff = datetime.utcnow() - timedelta(days=POST_PUBLISH_MEASUREMENT_DELAY_DAYS)
+        items = (
+            db.query(ScanContentItem)
+            .filter(
+                ScanContentItem.published_at.isnot(None),
+                ScanContentItem.published_at < cutoff,
+            )
+            .all()
+        )
+        if not items:
+            return
+
+        enqueued = 0
+        for item in items:
+            q_text = (item.target_question or "").strip()
+            if not q_text:
+                continue
+
+            question = (
+                db.query(ScanQuestion)
+                .filter(
+                    ScanQuestion.scan_id == item.scan_id,
+                    func.lower(ScanQuestion.question) == q_text.lower(),
+                )
+                .first()
+            )
+            if not question:
+                continue
+
+            # Already-measured guard : any ScanLLMResult dated after the
+            # T+14 threshold means a measurement has happened. Manual refresh
+            # before T+14 also satisfies this (the user already has data —
+            # auto-rescan would be redundant).
+            measurement_cutoff = item.published_at + timedelta(
+                days=POST_PUBLISH_MEASUREMENT_DELAY_DAYS - 1,
+            )
+            has_measurement = (
+                db.query(ScanLLMResult)
+                .filter(
+                    ScanLLMResult.question_id == question.id,
+                    ScanLLMResult.created_at > measurement_cutoff,
+                )
+                .first()
+            )
+            if has_measurement:
+                continue
+
+            # In-flight dedup
+            in_flight = (
+                db.query(Job)
+                .filter(
+                    Job.scan_id == item.scan_id,
+                    Job.job_type == "refresh_ai_snapshot",
+                    Job.status.in_(("pending", "running")),
+                )
+                .all()
+            )
+            if any((j.payload or {}).get("item_id") == str(item.id) for j in in_flight):
+                continue
+
+            job = Job(
+                scan_id=item.scan_id,
+                job_type="refresh_ai_snapshot",
+                status="pending",
+                payload={
+                    "item_id": str(item.id),
+                    "trigger": "t14_post_publish",
+                },
+                max_attempts=2,
+            )
+            db.add(job)
+            enqueued += 1
+            logger.info(
+                f"post_publish_measurement: enqueued T+{POST_PUBLISH_MEASUREMENT_DELAY_DAYS} "
+                f"measurement for item {item.id} (published {item.published_at})"
+            )
+
+        if enqueued > 0:
+            db.commit()
+            logger.info(
+                f"post_publish_measurement: enqueued {enqueued} job(s) this sweep "
+                f"({len(items)} items scanned)"
+            )
+    except Exception:
+        db.rollback()
+        logger.exception("enqueue_post_publish_measurements failed")
+    finally:
+        db.close()
+
+
 def poll_and_execute():
     """Pick one pending job and execute it."""
     db = SessionLocal()
@@ -501,6 +632,7 @@ def main():
     while True:
         try:
             cleanup_stuck_jobs()  # cheap no-op except every CLEANUP_INTERVAL_SECONDS
+            enqueue_post_publish_measurements()  # Pilier 7 T+14 sweep, every 1h
             had_job = poll_and_execute()
             if not had_job:
                 time.sleep(settings.poll_interval)

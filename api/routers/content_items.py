@@ -533,6 +533,85 @@ def _build_competitor_snapshot(
         default=None,
     )
 
+    # Phase E Pilier 7 — measurement loop delta.
+    # For each provider, we have potentially multiple ScanLLMResult rows over
+    # time : 1 from the original scan, optional user-triggered refreshes
+    # (Pilier 5), then the auto T+14 measurement after publish. We compute
+    # the position delta between the OLDEST row (= baseline pre-publish) and
+    # the LATEST row, scoped per-provider so ChatGPT and Gemini show
+    # independently.
+    #
+    # 'Position' here is `your_brand_position` — we recompute against
+    # primary_brand_domains to avoid the scan_domain confusion on competitor
+    # scans (see project_phase_e_pilier5_architecture.md edge case #1).
+    delta_metrics: dict | None = None
+    if item.published_at and llm_rows:
+        all_rows = (
+            db.query(ScanLLMResult)
+            .filter(ScanLLMResult.question_id == question.id)
+            .order_by(ScanLLMResult.created_at.asc())
+            .all()
+        )
+
+        def _own_position(citations: list | None) -> int | None:
+            if not citations:
+                return None
+            for idx, c in enumerate(citations):
+                if _domain_matches_own(c.get("domain") or c.get("domaine")):
+                    return idx + 1
+            return None
+
+        by_provider: dict[str, list] = {}
+        for r in all_rows:
+            by_provider.setdefault(r.provider, []).append(r)
+
+        per_provider: dict[str, dict] = {}
+        has_measurement = False
+        for provider, rows in by_provider.items():
+            if len(rows) < 2:
+                continue
+            baseline = rows[0]
+            latest = rows[-1]
+            if not latest.created_at or latest.created_at <= item.published_at:
+                continue
+            base_pos = _own_position(baseline.citations)
+            latest_pos = _own_position(latest.citations)
+            elapsed = (latest.created_at - item.published_at).days
+            delta = None
+            if base_pos is not None and latest_pos is not None:
+                delta = base_pos - latest_pos
+            per_provider[provider] = {
+                "baseline_position": base_pos,
+                "baseline_cited": base_pos is not None,
+                "baseline_at": baseline.created_at.isoformat() if baseline.created_at else None,
+                "latest_position": latest_pos,
+                "latest_cited": latest_pos is not None,
+                "latest_at": latest.created_at.isoformat() if latest.created_at else None,
+                "elapsed_days_since_publish": elapsed,
+                "delta": delta,
+            }
+            has_measurement = True
+
+        if has_measurement:
+            # Aggregate the best wins/losses across providers for the
+            # headline Peak-End chip. 'Improvement' = positive delta on
+            # any provider where the brand is now cited but wasn't, OR
+            # where the position number went down (= rank improved).
+            best_delta = max(
+                (m["delta"] for m in per_provider.values() if m.get("delta") is not None),
+                default=None,
+            )
+            newly_cited = any(
+                m.get("latest_cited") and not m.get("baseline_cited")
+                for m in per_provider.values()
+            )
+            delta_metrics = {
+                "per_provider": per_provider,
+                "best_delta": best_delta,
+                "newly_cited": newly_cited,
+                "published_at": item.published_at.isoformat() if item.published_at else None,
+            }
+
     # Check if there's an in-flight refresh job for this item — UI uses
     # this to disable the Refresh button and poll for completion.
     # Filter by scan_id (set on the job) rather than client_id (we create
@@ -557,6 +636,10 @@ def _build_competitor_snapshot(
         "latest_snapshot_at": latest_at.isoformat() if latest_at else None,
         "scan_question_id": str(question.id),
         "in_flight_refresh_job_id": str(in_flight_refresh_job.id) if in_flight_refresh_job else None,
+        # Phase E Pilier 7 — post-publish measurement delta. None until the
+        # item is published AND a measurement (auto T+14 OR manual refresh)
+        # has produced a second data point for at least one provider.
+        "delta_metrics": delta_metrics,
         "responses": responses,
     }
 
