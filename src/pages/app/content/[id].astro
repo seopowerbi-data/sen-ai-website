@@ -297,9 +297,9 @@ function fmtDate(iso: string | null): string {
                     <svg class="w-3.5 h-3.5 text-coral" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
                     </svg>
-                    <span><strong class="text-charcoal-dark">Top 3 suggestions from your sitemap</strong> · pages we indexed on your brand's site that semantically match your question</span>
+                    <strong class="text-charcoal-dark">3 suggestions for this question</strong>
                     <span class="cursor-help select-none ml-0.5"
-                          title="How it's computed:&#10;&#10;• Match % = how close the page content is to your question (semantic embedding similarity)&#10;&#10;• 🔗 backlinks = how many OTHER pages on your site link to this page — a hub-page authority signal that gives the page a small score boost (the more inlinks, the more 'canonical' the page is for SEO)&#10;&#10;Source: built from your sitemap.xml. Refresh in Settings → Brand sitemaps if your pages have changed.">ⓘ</span>
+                          title="3 pages indexed from your sitemap.xml that best match this question — pick one with 'Use this →', or type any URL manually below.&#10;&#10;HOW IT'S COMPUTED&#10;• Match % — semantic similarity between the page content and your question (cosine on text embeddings)&#10;• 🔗 backlinks — how many OTHER pages on your site link to this page; a 'hub-page' authority signal that boosts the score (more inlinks = more canonical for SEO)&#10;&#10;Source : your brand's sitemap.xml + linked pages. Refresh in Settings → Brand sitemaps if your site has changed.">ⓘ</span>
                   </div>
                   <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
                     <template x-for="c in item.target_url_candidates" :key="c.url">
@@ -496,7 +496,24 @@ function fmtDate(iso: string | null): string {
 
             <template x-if="item.content_html || item.content_text">
               <div>
-                <div x-show="editorMode === 'visual'" class="prose prose-sm max-w-none faq-rendered border border-gray-100 rounded-lg p-4 min-h-[300px] focus:outline-none focus:border-coral"
+                {/* Editability affordance — Postel's Law + Affordance discoverability.
+                    The contenteditable div doesn't visually signal it's editable;
+                    users routinely miss the fact they can click and rewrite any
+                    Q/A on the spot. One short hint above + inline save state so
+                    the user knows the edit landed (Doherty Threshold). Visible
+                    in Visual mode only — HTML mode is the textarea pattern users
+                    already recognize (Jakob's). */}
+                <div x-show="editorMode === 'visual'"
+                     class="mb-2 text-[11px] text-charcoal-light flex items-center gap-2 flex-wrap">
+                  <span class="inline-flex items-center gap-1.5">
+                    <svg class="w-3.5 h-3.5 text-coral" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+                    </svg>
+                    <span><strong class="text-charcoal-dark">Click any answer to edit</strong> · changes auto-save</span>
+                  </span>
+                  <span :class="saveStateClass()" class="text-[10px] tabular-nums" x-text="saveStateLabel()"></span>
+                </div>
+                <div x-show="editorMode === 'visual'" class="prose prose-sm max-w-none faq-rendered border border-gray-100 rounded-lg p-4 min-h-[300px] focus:outline-none focus:border-coral hover:border-gray-300 transition-colors cursor-text"
                      contenteditable="true"
                      x-ref="visualEditor"
                      x-html="renderedContentHtml()"
