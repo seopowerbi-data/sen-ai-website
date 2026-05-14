@@ -1,8 +1,9 @@
 """Handler: crawl a client_brand's sitemap and reconcile client_brand_pages.
 
-Phase D, Day 1. Discovers the URL list for a brand's domain via
-sitemap_crawler.discover_sitemap_urls, then idempotently diffs it against
-the existing client_brand_pages rows for that brand.
+Phase D, Day 1+2. Discovers the URL list for a brand's domain via
+sitemap_crawler.discover_sitemap_urls, idempotently diffs it against the
+existing client_brand_pages rows, then chains fetch_brand_pages so the
+newly-inserted rows get their meta + body_excerpt populated.
 
 Diff semantics (one pass, in one transaction) :
 
@@ -25,8 +26,14 @@ Diff semantics (one pass, in one transaction) :
         -> If status == 'gone' already: no change (gone_since stays at the
            first time we noticed).
 
-Day 1 does NOT enqueue fetch_brand_pages or embed_brand_pages — those land
-Day 2 + Day 3. The handler just leaves rows in 'pending_fetch' and returns.
+Day 2 update : when the diff produces new rows OR there are still rows in
+pending_fetch from prior runs (e.g., a previous handler crash mid-loop),
+the handler enqueues a fetch_brand_pages job before returning. The fetch
+handler then short-circuits cleanly if there's nothing to do, so the
+chain is safe even when the diff is fully bumps-only.
+
+Day 3 will add the further chain : fetch_brand_pages -> embed_brand_pages
+-> purge_stale_pages.
 
 Payload :
     {"client_brand_id": str}
@@ -178,9 +185,15 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
         else:
             bumped += 1
 
-    # 2) Gone-marking for DB rows whose URL disappeared from the sitemap
+    # 2) Gone-marking for DB rows whose URL disappeared from the sitemap.
+    #
+    # Manual rows (source='manual', user-added via Settings UI per migration
+    # 027) are exempt — the user added them precisely because they weren't
+    # in the sitemap; their absence here is expected, not a removal signal.
     for url, row in existing_by_url.items():
         if url in sitemap_urls:
+            continue
+        if (getattr(row, "source", "sitemap") or "sitemap") != "sitemap":
             continue
         if row.status == "gone":
             # Already marked. Idempotent — leave gone_since alone.
@@ -202,13 +215,42 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
         f"marked_gone={marked_gone} restored={restored}"
     )
 
-    # NOTE: Day 2 will append `db.add(Job(job_type='fetch_brand_pages', ...))`
-    # here to chain the fetch step. For Day 1 we leave rows in pending_fetch
-    # and exit cleanly so the smoke test can inspect persistence in isolation.
-    logger.info(
-        f"Chain target on Day 2: enqueue fetch_brand_pages for "
-        f"client_brand_id={client_brand_id} ({inserted} pending_fetch rows)"
-    )
+    # Chain : enqueue fetch_brand_pages so the new pending_fetch rows get
+    # their meta + body_excerpt populated. We enqueue iff there's actual
+    # work for the fetch handler (new inserts, restores from gone, or
+    # leftover pending_fetch from a prior crashed run). On a fully bumps-
+    # only re-crawl we skip the enqueue — the fetch handler would no-op.
+    fetch_job_id: str | None = None
+    has_outstanding_work = inserted > 0 or restored > 0
+    if not has_outstanding_work:
+        from models import ClientBrandPage as _CBP
+        has_outstanding_work = (
+            db.query(_CBP)
+            .filter(
+                _CBP.client_brand_id == client_brand_id,
+                _CBP.status == "pending_fetch",
+            )
+            .limit(1)
+            .first()
+            is not None
+        )
+
+    if has_outstanding_work:
+        from models import Job
+        fetch_job = Job(
+            client_id=brand.client_id,
+            job_type="fetch_brand_pages",
+            status="pending",
+            payload={"client_brand_id": str(client_brand_id)},
+            max_attempts=2,
+        )
+        db.add(fetch_job)
+        db.commit()
+        fetch_job_id = str(fetch_job.id)
+        logger.info(
+            f"Chained fetch_brand_pages job {fetch_job_id} for "
+            f"client_brand_id={client_brand_id} (brand={brand.name})"
+        )
 
     return {
         "client_brand_id": str(client_brand_id),
@@ -221,4 +263,5 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
         "marked_gone": marked_gone,
         "restored": restored,
         "errors": errors,
+        "chained_fetch_job_id": fetch_job_id,
     }

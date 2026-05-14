@@ -1,11 +1,19 @@
-"""Sitemap discovery + parsing for Phase D sitemap-index.
+"""Sitemap discovery + page-meta fetch for Phase D sitemap-index.
 
-Pure functions (no DB). Pulls the list of URLs for a brand's domain from
-its sitemap.xml — with index recursion (one level), junk filter, and a
-hard 5000-URL cap.
+Pure functions (no DB). Two responsibilities :
 
-Day 1 deliverable. Day 2 will add page-meta fetch + body extraction;
-Day 3 will compute embeddings.
+  1. Discovery (Day 1) : pull the list of URLs for a brand's domain from
+     its sitemap.xml — with index recursion (one level), junk filter, and
+     a hard 5000-URL cap. Entry point : `discover_sitemap_urls`.
+
+  2. Per-page fetch (Day 2) : fetch one page, extract title / meta /
+     h1 / body_excerpt / canonical / lang, detect soft-404s, and report
+     redirects. Entry point : `fetch_page_meta`. Robots.txt allow-check
+     via `is_robots_allowed` (stdlib urllib.robotparser — RFC 9309
+     compliant, zero deps; deviates from the plan's `reppy` choice to
+     keep the dep surface flat).
+
+Day 3 will add embeddings + inlinks.
 
 The discovery chain tries, in order :
   1. https://{domain}/sitemap.xml
@@ -343,3 +351,275 @@ def discover_sitemap_urls(domain: str) -> list[tuple[str, datetime | None]]:
         f"raw={len(raw_pairs)} cap={MAX_URLS_PER_BRAND}"
     )
     return list(seen.items())
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Day 2 : per-page fetch + meta extraction
+# ─────────────────────────────────────────────────────────────────────────
+
+# Soft-404 detection : these substrings in <title> indicate the server
+# returned 200 OK but the page is actually a "page not found" placeholder.
+# Conservative — keyed to short titles only (`is_soft_404` enforces the
+# < 60 char ceiling per plan) to avoid catching legitimate articles that
+# happen to mention "not found" in their title.
+_SOFT_404_TITLE_PATTERNS = re.compile(
+    r"\b(?:404|not\s*found|introuvable|page\s*non\s*trouv(?:é|e)e|"
+    r"page\s*not\s*found|page\s*indisponible)\b",
+    re.IGNORECASE,
+)
+
+# Per-host robots.txt cache. RobotFileParser is cheap to keep around and
+# `is_robots_allowed` calls it once per page-fetch. Cleared when the worker
+# process restarts — which is fine, robots.txt rarely changes within a run.
+_ROBOTS_CACHE: dict[str, "object"] = {}
+
+
+def is_soft_404(title: str | None, body_excerpt: str | None) -> bool:
+    """Heuristic : did a 200-OK page actually deliver a "page not found" ?
+
+    True when the title is short (< 60 chars, per plan) AND matches one of
+    the soft-404 patterns. Conservative — we'd rather miss a soft-404 than
+    drop a real page.
+    """
+    if not title:
+        return False
+    t = title.strip()
+    if len(t) >= 60:
+        return False
+    return bool(_SOFT_404_TITLE_PATTERNS.search(t))
+
+
+def extract_body_excerpt(html: str, max_words: int = 300) -> str:
+    """Pull a 300-word excerpt from a page's primary content region.
+
+    Selector priority : <main> > <article> > <body>. Inside the chosen
+    container, we strip the structural noise tags (<nav>, <footer>,
+    <aside>, <header>, <script>, <style>, <noscript>, <form>, <iframe>)
+    then collapse whitespace and cap to `max_words` words.
+
+    Returns "" on parse failure or genuinely empty content — caller can
+    flag the row and Day 3 will fall back to title+meta+h1 for embedding.
+    """
+    if not html:
+        return ""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception as exc:
+        logger.info(f"body extraction soup failed: {exc}")
+        return ""
+    container = soup.find("main") or soup.find("article") or soup.body
+    if container is None:
+        return ""
+    # Drop structural noise. decompose() removes from the tree entirely so
+    # subsequent get_text() doesn't return their content.
+    for tag in container(["nav", "footer", "aside", "header", "script", "style",
+                          "noscript", "form", "iframe"]):
+        tag.decompose()
+    text = container.get_text(separator=" ", strip=True)
+    # Collapse whitespace runs (newlines, tabs, multiple spaces -> single space)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+    words = text.split(" ")
+    if len(words) > max_words:
+        words = words[:max_words]
+    return " ".join(words)
+
+
+def _absolutize(base_url: str, href: str | None) -> str | None:
+    if not href:
+        return None
+    from urllib.parse import urljoin
+    return urljoin(base_url, href.strip())
+
+
+def is_robots_allowed(url: str, user_agent: str = _USER_AGENT) -> bool:
+    """Is the User-Agent allowed to fetch this URL per the host's robots.txt ?
+
+    Uses stdlib `urllib.robotparser` (RFC 9309). Per-host parsers cached
+    process-wide. Safe default = True when robots.txt is missing, 4xx, or
+    unparseable — the conservative-allow posture matches what most
+    well-behaved crawlers do and means a broken robots.txt can't lock us
+    out of a brand we paid to crawl.
+    """
+    from urllib.parse import urlparse
+    from urllib.robotparser import RobotFileParser
+
+    if not url:
+        return True
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return True
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return True
+    if host in _ROBOTS_CACHE:
+        rp = _ROBOTS_CACHE[host]
+        if rp is None:
+            return True
+        return rp.can_fetch(user_agent, url)
+
+    robots_url = f"{parsed.scheme or 'https'}://{host}/robots.txt"
+    try:
+        with httpx.Client(
+            headers={"User-Agent": user_agent},
+            timeout=_HTTP_TIMEOUT,
+            follow_redirects=True,
+        ) as client:
+            resp = client.get(robots_url)
+    except httpx.HTTPError as exc:
+        logger.info(f"robots.txt fetch failed for {host}: {exc} — allowing")
+        _ROBOTS_CACHE[host] = None
+        return True
+
+    if resp.status_code >= 400:
+        # 404 robots.txt = no restrictions. Same posture for any 4xx.
+        logger.info(f"robots.txt for {host} returned {resp.status_code} — allowing")
+        _ROBOTS_CACHE[host] = None
+        return True
+
+    rp = RobotFileParser()
+    try:
+        rp.parse(resp.text.splitlines())
+    except Exception as exc:
+        logger.info(f"robots.txt parse failed for {host}: {exc} — allowing")
+        _ROBOTS_CACHE[host] = None
+        return True
+
+    _ROBOTS_CACHE[host] = rp
+    return rp.can_fetch(user_agent, url)
+
+
+def fetch_page_meta(
+    url: str,
+    if_modified_since: datetime | None = None,
+    client: httpx.Client | None = None,
+) -> dict:
+    """Fetch one page and extract the metadata Day 3's matcher needs.
+
+    Returns a dict with the following keys (always present, may be None) :
+        title, meta_description, h1, body_excerpt, lang, canonical,
+        http_status, redirected_to, fetch_error
+
+    Semantics :
+      - On 304 Not Modified : returns {http_status: 304, ...all extracted
+        fields None, fetch_error None}. Caller bumps last_crawled_at but
+        does not flip status.
+      - On 200 OK : extracts and returns the parsed fields. `redirected_to`
+        = final URL if it differs from the input (after follow-redirects),
+        else None.
+      - On HTTP errors / network errors / parse errors : returns
+        {http_status: <code or None>, fetch_error: <message>, ...None}.
+
+    `client` is optional — pass a shared httpx.Client for connection pooling
+    across many fetches in the same handler run. If absent we create a
+    one-shot client.
+    """
+    result = {
+        "title": None,
+        "meta_description": None,
+        "h1": None,
+        "body_excerpt": None,
+        "lang": None,
+        "canonical": None,
+        "http_status": None,
+        "redirected_to": None,
+        "fetch_error": None,
+    }
+
+    headers: dict[str, str] = {}
+    if if_modified_since is not None:
+        # HTTP-date format per RFC 7231 §7.1.1.1
+        headers["If-Modified-Since"] = if_modified_since.strftime(
+            "%a, %d %b %Y %H:%M:%S GMT"
+        )
+
+    owns_client = client is None
+    if owns_client:
+        client = httpx.Client(
+            headers={
+                "User-Agent": _USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.5",
+            },
+            timeout=_HTTP_TIMEOUT,
+            follow_redirects=True,
+            max_redirects=3,
+        )
+
+    try:
+        try:
+            resp = client.get(url, headers=headers)
+        except httpx.HTTPError as exc:
+            result["fetch_error"] = f"network: {type(exc).__name__}: {exc}"[:300]
+            return result
+
+        result["http_status"] = resp.status_code
+
+        # Track redirects (final URL after follow)
+        final_url = str(resp.url)
+        if final_url and final_url != url:
+            result["redirected_to"] = final_url
+
+        if resp.status_code == 304:
+            return result
+
+        if resp.status_code != 200:
+            result["fetch_error"] = f"http_{resp.status_code}"
+            return result
+
+        content_type = (resp.headers.get("content-type") or "").lower()
+        if "html" not in content_type and "xml" not in content_type:
+            # PDF, image, JSON, etc. — not a page we can extract from.
+            result["fetch_error"] = f"non_html_content_type: {content_type[:80]}"
+            return result
+
+        try:
+            html = resp.text
+        except Exception as exc:
+            result["fetch_error"] = f"decode_error: {exc}"[:300]
+            return result
+
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+        except Exception as exc:
+            result["fetch_error"] = f"parse_error: {exc}"[:300]
+            return result
+
+        # <title>
+        if soup.title and soup.title.string:
+            result["title"] = soup.title.string.strip()[:500] or None
+
+        # <meta name="description">
+        md = soup.find("meta", attrs={"name": "description"})
+        if md and md.get("content"):
+            result["meta_description"] = md["content"].strip()[:500] or None
+
+        # <h1> — first one only
+        h1 = soup.find("h1")
+        if h1:
+            h1_text = h1.get_text(separator=" ", strip=True)
+            if h1_text:
+                result["h1"] = h1_text[:500]
+
+        # <html lang>
+        html_tag = soup.find("html")
+        if html_tag and html_tag.get("lang"):
+            result["lang"] = html_tag["lang"].strip().lower()[:10] or None
+
+        # <link rel="canonical">
+        canon = soup.find("link", rel="canonical")
+        if canon and canon.get("href"):
+            abs_canon = _absolutize(final_url, canon["href"])
+            if abs_canon and abs_canon != final_url:
+                result["canonical"] = abs_canon[:1000]
+
+        # Body excerpt (300 words from main/article/body, structural noise stripped)
+        result["body_excerpt"] = extract_body_excerpt(html) or None
+
+        return result
+    finally:
+        if owns_client:
+            client.close()
+

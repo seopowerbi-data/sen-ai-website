@@ -164,6 +164,9 @@ class ClientBrandPage(Base):
     last_crawled_at = Column(DateTime)
     last_embedded_at = Column(DateTime)
     gone_since = Column(DateTime)
+    # Discovery source: 'sitemap' (default) or 'manual' (user-added).
+    # Migration 027.
+    source = Column(Text, nullable=False, default="sitemap")
 
 
 class Scan(Base):
