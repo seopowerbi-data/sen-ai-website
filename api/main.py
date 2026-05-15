@@ -6,7 +6,7 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from config import settings
 from models import Base, engine
-from routers import admin, audit_requests, auth, clients, content_items, oauth, organizations, reports, stripe, scans, brands
+from routers import admin, audit_requests, auth, clients, content_items, invitations, oauth, organizations, reports, stripe, scans, brands
 from services.rate_limit import limiter
 from services.request_context import current_request_method
 
@@ -56,6 +56,8 @@ app.include_router(audit_requests.router, prefix="/api/audit-requests", tags=["a
 app.include_router(content_items.router, prefix="/api", tags=["content-items"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 app.include_router(organizations.router, prefix="/api/organizations", tags=["organizations"])
+app.include_router(invitations.org_scoped_router, prefix="/api/organizations", tags=["invitations"])
+app.include_router(invitations.token_scoped_router, prefix="/api/invitations", tags=["invitations"])
 
 
 @app.on_event("startup")

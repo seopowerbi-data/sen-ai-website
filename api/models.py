@@ -92,6 +92,30 @@ class OrgUserClient(Base):
     role = Column(Text, nullable=False)  # 'viewer' | 'editor' | 'owner'
 
 
+class Invitation(Base):
+    """Org-level invitation (Phase E.C.4). See migration 030 for lifecycle.
+
+    Per-client access is NOT granted on accept — admins promote the new
+    member from the members page once they've joined.
+    """
+    __tablename__ = "invitations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    email = Column(Text, nullable=False)
+    org_role = Column(Text, nullable=False, default="member")
+    token = Column(Text, nullable=False, unique=True)
+    invited_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
+    message = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    accepted_at = Column(DateTime)
+    accepted_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
+    revoked_at = Column(DateTime)
+
+    organization = relationship("Organization")
+
+
 class UserClient(Base):
     __tablename__ = "user_clients"
 
