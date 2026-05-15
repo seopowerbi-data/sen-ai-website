@@ -233,6 +233,10 @@ async def logout(response: Response):
     session even after clicking "logout" or submitting a different login form.
     """
     response.delete_cookie("token", path="/")
+    # Phase E.C.2 — also clear the active org cookie so a different user
+    # logging in on the same browser doesn't inherit the previous session's
+    # workspace selection.
+    response.delete_cookie("active_organization_id", path="/")
     return {"ok": True}
 
 

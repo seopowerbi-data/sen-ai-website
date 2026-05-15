@@ -32,6 +32,33 @@ try {
   return Astro.redirect('/login');
 }
 
+// Phase E.C.2 — forward the active org cookie alongside the auth token so
+// the API can scope `GET /api/clients/` to the user's currently-selected
+// workspace. The cookie is HttpOnly and only set after `POST /api/organizations/active`.
+const activeOrgCookie = Astro.cookies.get('active_organization_id')?.value;
+const upstreamCookie = activeOrgCookie
+  ? `token=${token}; active_organization_id=${activeOrgCookie}`
+  : `token=${token}`;
+
+// Phase E.C.2 — fetch organizations the user belongs to (drives the header
+// switcher). Failure is non-fatal : the rest of the dashboard still renders.
+type OrgItem = {
+  id: string; name: string; slug: string | null; is_personal: boolean;
+  role: string | null; member_count: number; client_count: number; is_active: boolean;
+};
+let organizations: OrgItem[] = [];
+let activeOrg: OrgItem | null = null;
+try {
+  const orgsRes = await fetch('http://api:8000/api/organizations/', {
+    headers: { Cookie: upstreamCookie },
+    signal: AbortSignal.timeout(3000),
+  });
+  if (orgsRes.ok) {
+    organizations = await orgsRes.json();
+    activeOrg = organizations.find(o => o.is_active) || organizations[0] || null;
+  }
+} catch {}
+
 // Fetch client data (apps + credits) server-side
 let scanCredits = 0;
 let contentCredits = 0;
@@ -40,7 +67,7 @@ let isSuperadmin = false;
 
 try {
   const clientsRes = await fetch('http://api:8000/api/clients/', {
-    headers: { Cookie: `token=${token}` },
+    headers: { Cookie: upstreamCookie },
     signal: AbortSignal.timeout(3000),
   });
   if (clientsRes.ok) {
@@ -128,6 +155,88 @@ const icons = {
           <img src="/logo-sen-ai-fr.png" alt="sen-ai.fr" class="h-7 brightness-0 invert opacity-90" />
         </a>
       </div>
+
+      <!-- Phase E.C.2 — Workspace (organization) switcher.
+           1 org : static chip, no chevron (Aesthetic-Usability, no fake interaction).
+           2+ orgs : dropdown with checkmark on active.
+           Persistence : POST /api/organizations/active sets a server-side
+           HttpOnly cookie that the SSR layer reads on the next page render. -->
+      {activeOrg && (
+        <div class="px-3 py-3 border-b border-white/10">
+          {organizations.length < 2 ? (
+            <div class="flex items-center gap-2.5 px-2 py-1.5 rounded-md">
+              <div class="w-6 h-6 rounded bg-white/10 flex items-center justify-center text-white text-[11px] font-bold uppercase shrink-0">
+                {activeOrg.name?.[0] || '?'}
+              </div>
+              <div class="min-w-0 flex-1">
+                <div class="text-[13px] text-white font-medium truncate">{activeOrg.name}</div>
+                {activeOrg.is_personal ? (
+                  <div class="text-[10px] text-gray-500 uppercase tracking-wide">Personal</div>
+                ) : (
+                  <div class="text-[10px] text-gray-500">{activeOrg.client_count} workspace{activeOrg.client_count !== 1 ? 's' : ''}</div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div x-data="{ open: false }" class="relative">
+              <button
+                @click="open = !open"
+                @click.outside="open = false"
+                @keydown.escape.window="open = false"
+                class="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md hover:bg-white/5 transition-colors group"
+                aria-haspopup="listbox"
+                :aria-expanded="open"
+              >
+                <div class="w-6 h-6 rounded bg-white/10 flex items-center justify-center text-white text-[11px] font-bold uppercase shrink-0">
+                  {activeOrg.name?.[0] || '?'}
+                </div>
+                <div class="min-w-0 flex-1 text-left">
+                  <div class="text-[13px] text-white font-medium truncate">{activeOrg.name}</div>
+                  <div class="text-[10px] text-gray-500">{organizations.length} organizations</div>
+                </div>
+                <svg class="w-4 h-4 text-gray-500 group-hover:text-gray-300 shrink-0 transition-transform" :class="open && 'rotate-180'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+              <div
+                x-show="open"
+                x-transition.opacity.duration.100ms
+                x-cloak
+                class="absolute left-0 right-0 top-full mt-1 bg-charcoal border border-white/10 rounded-md shadow-xl py-1 z-50"
+                role="listbox"
+              >
+                {organizations.map(org => (
+                  <button
+                    type="button"
+                    data-org-id={org.id}
+                    class:list={[
+                      'org-switch-btn w-full flex items-center gap-2.5 px-2.5 py-2 hover:bg-white/5 transition-colors text-left',
+                      org.is_active && 'bg-white/[0.03]',
+                    ]}
+                    role="option"
+                    aria-selected={org.is_active ? 'true' : 'false'}
+                  >
+                    <div class="w-6 h-6 rounded bg-white/10 flex items-center justify-center text-white text-[11px] font-bold uppercase shrink-0">
+                      {org.name?.[0] || '?'}
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <div class="text-[13px] text-white truncate">{org.name}</div>
+                      <div class="text-[10px] text-gray-500">
+                        {org.is_personal ? 'Personal' : `${org.client_count} workspace${org.client_count !== 1 ? 's' : ''} · ${org.member_count} member${org.member_count !== 1 ? 's' : ''}`}
+                      </div>
+                    </div>
+                    {org.is_active && (
+                      <svg class="w-4 h-4 text-coral shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
+                      </svg>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <!-- Navigation -->
       <nav class="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
@@ -237,6 +346,30 @@ const icons = {
         await fetch('/api/auth/logout', { method: 'POST' });
       } catch (e) {}
       window.location.href = '/login';
+    });
+
+    // Phase E.C.2 — org switcher : POST sets the HttpOnly cookie server-side,
+    // then a full reload picks up the new scope across every SSR fetch.
+    document.querySelectorAll('.org-switch-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const orgId = btn.getAttribute('data-org-id');
+        if (!orgId) return;
+        btn.setAttribute('disabled', 'true');
+        try {
+          const res = await fetch('/api/organizations/active', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ organization_id: orgId }),
+          });
+          if (res.ok) {
+            window.location.href = '/app/dashboard';
+          } else {
+            btn.removeAttribute('disabled');
+          }
+        } catch (e) {
+          btn.removeAttribute('disabled');
+        }
+      });
     });
   </script>
 </body>

@@ -7,8 +7,10 @@ if (!token) return Astro.redirect('/login');
 
 let scans = [];
 try {
+  const activeOrgCookie = Astro.cookies.get('active_organization_id')?.value;
+  const upstreamCookie = activeOrgCookie ? `token=${token}; active_organization_id=${activeOrgCookie}` : `token=${token}`;
   const clientsRes = await fetch('http://api:8000/api/clients/', {
-    headers: { Cookie: `token=${token}` },
+    headers: { Cookie: upstreamCookie },
     signal: AbortSignal.timeout(3000),
   });
   const clients = clientsRes.ok ? await clientsRes.json() : [];

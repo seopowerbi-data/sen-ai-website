@@ -21,8 +21,10 @@ try {
 // Get client_id for credit balance
 let clientId = null;
 try {
+  const activeOrgCookie = Astro.cookies.get('active_organization_id')?.value;
+  const upstreamCookie = activeOrgCookie ? `token=${token}; active_organization_id=${activeOrgCookie}` : `token=${token}`;
   const res = await fetch('http://api:8000/api/clients/', {
-    headers: { Cookie: `token=${token}` },
+    headers: { Cookie: upstreamCookie },
     signal: AbortSignal.timeout(3000),
   });
   const clients = res.ok ? await res.json() : [];

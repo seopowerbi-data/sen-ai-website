@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request
 from services.rate_limit import limiter
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from models import Client, ClientBrand, ClientBrandPage, ClientCredit, Job, ScanBrandClassification, UserClient, get_db
+from services.access import list_user_clients
 from services.auth_service import get_current_user
 from services.request_context import current_request_method
 from services.sanitize import strip_tags
@@ -45,10 +46,21 @@ class ClientCreate(BaseModel):
 
 
 @router.get("/", response_model=list[ClientResponse])
-async def list_clients(user=Depends(get_current_user), db: Session = Depends(get_db)):
-    links = db.query(UserClient).filter(UserClient.user_id == user.id).all()
-    client_ids = [link.client_id for link in links]
-    clients = db.query(Client).filter(Client.id.in_(client_ids)).all()
+async def list_clients(
+    active_organization_id: str | None = Cookie(default=None),
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # Phase E.C.2 — scope to the active org when the cookie is set AND the
+    # user is actually a member of that org. `list_user_clients` handles the
+    # org_user_clients + user_clients legacy union; we only forward the cookie
+    # as a filter, never trust it for access decisions. If the cookie points
+    # at an org the user no longer belongs to, `list_user_clients` returns
+    # an empty filtered set — fall back to the unscoped global list so the
+    # user never gets stuck with zero workspaces.
+    clients = list_user_clients(user, db, organization_id=active_organization_id)
+    if not clients and active_organization_id:
+        clients = list_user_clients(user, db, organization_id=None)
     return [ClientResponse(id=str(c.id), name=c.name, brand=c.brand, apps=c.apps) for c in clients]
 
 
