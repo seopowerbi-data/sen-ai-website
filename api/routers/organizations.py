@@ -27,7 +27,7 @@ from config import settings
 from models import (
     Client, Organization, OrganizationUser, OrgUserClient, get_db,
 )
-from services.access import list_user_organizations
+from services.access import list_user_organizations, resolve_active_organization_id
 from services.auth_service import get_current_user
 
 
@@ -109,7 +109,11 @@ async def list_organizations(
     )
     clients_by_org = {str(r.organization_id): int(r.n) for r in client_rows}
 
-    valid_active = active_organization_id in {str(o.id) for o in orgs}
+    # Match the API-side resolution so the dropdown highlights the same org
+    # that `GET /api/clients/` will scope to. Without this, a multi-org user
+    # without a cookie would see "no active" in the UI while their clients
+    # were silently scoped to the personal org — confusing.
+    effective_active_id = resolve_active_organization_id(user, db, active_organization_id)
 
     return [
         OrgListItem(
@@ -120,7 +124,7 @@ async def list_organizations(
             role=role_by_org.get(str(o.id)),
             member_count=members_by_org.get(str(o.id), 0),
             client_count=clients_by_org.get(str(o.id), 0),
-            is_active=(valid_active and str(o.id) == active_organization_id),
+            is_active=(effective_active_id is not None and str(o.id) == effective_active_id),
         )
         for o in orgs
     ]

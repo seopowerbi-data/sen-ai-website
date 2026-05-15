@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from models import Client, ClientBrand, ClientBrandPage, ClientCredit, Job, ScanBrandClassification, UserClient, get_db
-from services.access import list_user_clients
+from services.access import list_user_clients, resolve_active_organization_id
 from services.auth_service import get_current_user
 from services.request_context import current_request_method
 from services.sanitize import strip_tags
@@ -51,15 +51,18 @@ async def list_clients(
     user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Phase E.C.2 — scope to the active org when the cookie is set AND the
-    # user is actually a member of that org. `list_user_clients` handles the
-    # org_user_clients + user_clients legacy union; we only forward the cookie
-    # as a filter, never trust it for access decisions. If the cookie points
-    # at an org the user no longer belongs to, `list_user_clients` returns
-    # an empty filtered set — fall back to the unscoped global list so the
-    # user never gets stuck with zero workspaces.
-    clients = list_user_clients(user, db, organization_id=active_organization_id)
-    if not clients and active_organization_id:
+    # Phase E.C.2 — resolve the effective active org : explicit cookie (if
+    # user is still a member) > personal org > None. Defaulting to the
+    # personal org is critical because most legacy dashboard pages do
+    # `clients[0]?.id` to find "the user's workspace" ; without a default,
+    # adding a second org would silently push the personal client out of
+    # position 0 when sorted alphabetically (observed 2026-05-15 smoke).
+    effective_org_id = resolve_active_organization_id(user, db, active_organization_id)
+    clients = list_user_clients(user, db, organization_id=effective_org_id)
+    if not clients and effective_org_id:
+        # Defensive : personal org has zero clients (shouldn't happen post-C.1
+        # backfill, but if it does, fall back to the union so the user is
+        # never stuck with zero workspaces).
         clients = list_user_clients(user, db, organization_id=None)
     return [ClientResponse(id=str(c.id), name=c.name, brand=c.brand, apps=c.apps) for c in clients]
 

@@ -120,6 +120,53 @@ def check_client_access(
     return role
 
 
+def resolve_active_organization_id(user, db: Session, cookie_value: str | None) -> str | None:
+    """Resolve the effective active org for this user, in priority order :
+
+    1. Explicit cookie value, IF the user is still a member of that org.
+       Stale cookies (org deleted, user removed) are ignored — fall through.
+    2. The user's `is_personal` org if any (C.1 backfill creates one per
+       legacy client). This is the safe default that matches the "each org
+       = isolated workspace" mental model.
+    3. None — caller decides what to do (typically : show everything).
+
+    Why this exists : without a default, multi-org users hitting any page
+    that does `clients[0]?.id` would get a client from whichever org
+    happens to sort first alphabetically — which silently breaks every
+    legacy page that assumes clients[0] is "your workspace". Observed
+    2026-05-15 with a smoke org "Demo Client B" pushing the real client
+    out of position 0 → /welcome onboarding loop.
+    """
+    if not user:
+        return None
+
+    if cookie_value:
+        is_member = (
+            db.query(OrganizationUser)
+            .filter(
+                OrganizationUser.user_id == user.id,
+                OrganizationUser.organization_id == cookie_value,
+            )
+            .first()
+        )
+        if is_member:
+            return cookie_value
+
+    personal = (
+        db.query(Organization)
+        .join(OrganizationUser, OrganizationUser.organization_id == Organization.id)
+        .filter(
+            OrganizationUser.user_id == user.id,
+            Organization.is_personal.is_(True),
+        )
+        .order_by(Organization.created_at.asc())
+        .first()
+    )
+    if personal:
+        return str(personal.id)
+    return None
+
+
 def list_user_organizations(user, db: Session) -> list[Organization]:
     """All orgs the user is a member of, ordered alphabetically by name.
 
