@@ -173,37 +173,19 @@ _DESTRUCTIVE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 def _check_scan_access(scan_id: str, user, db: Session) -> Scan:
     """Verify the current user has access to a scan, with method-aware RBAC.
 
-    H6: on destructive HTTP methods (POST/PUT/PATCH/DELETE) the caller's
-    `UserClient.role` must be at least 'editor'. On GET it just needs any
-    link (viewer is enough). The HTTP method is read from a contextvar set
-    by `request_method_middleware` in main.py — that lets every existing
-    call site (38 of them across this router) gain RBAC enforcement
-    without changing its signature.
-
-    Note that this enforcement only matters once team features ship — today
-    every account is solo-owner of its own client(s), so the check is a
-    no-op in practice. It's wired up now so future invitee accounts in
-    'viewer' role can never silently bypass write protections.
+    Delegates to `services.access.check_client_access` so the new
+    `org_user_clients` table is honored alongside the legacy `user_clients`
+    fallback (Phase E.C.2). Without this, a user who gained access to a
+    client through the org layer (no legacy `user_clients` row) would get
+    a spurious 403 — observed when switching to a freshly-created org with
+    a client they own via `org_user_clients` only.
     """
+    from services.access import check_client_access
+
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
     if not scan:
         raise HTTPException(404, "Scan not found")
-    link = db.query(UserClient).filter(
-        UserClient.user_id == user.id,
-        UserClient.client_id == scan.client_id,
-    ).first()
-    if not link:
-        raise HTTPException(403, "Access denied")
-
-    method = current_request_method.get()
-    if method in _DESTRUCTIVE_METHODS:
-        rank = _ROLE_RANK.get(link.role, -1)
-        if rank < _ROLE_RANK["editor"]:
-            raise HTTPException(
-                403,
-                f"Insufficient role: '{link.role}' cannot {method} on this scan "
-                f"(requires 'editor' or 'owner')",
-            )
+    check_client_access(str(scan.client_id), user, db)
     return scan
 
 
@@ -269,18 +251,9 @@ def _serialize_scan(scan: Scan) -> dict:
 @router.post("/")
 @limiter.limit("20/minute")
 async def create_scan(request: Request, req: ScanCreate, user=Depends(get_current_user), db: Session = Depends(get_db)):
-    link = db.query(UserClient).filter(
-        UserClient.user_id == user.id,
-        UserClient.client_id == req.client_id,
-    ).first()
-    if not link:
-        raise HTTPException(403, "Access denied to this client")
-    # H6: creating a scan is a destructive write — viewers can't.
-    if _ROLE_RANK.get(link.role, -1) < _ROLE_RANK["editor"]:
-        raise HTTPException(
-            403,
-            f"Insufficient role: '{link.role}' cannot create scans (requires 'editor' or 'owner')",
-        )
+    from services.access import check_client_access
+    # POST is destructive → check_client_access auto-enforces 'editor' minimum.
+    check_client_access(req.client_id, user, db)
 
     if req.max_position not in (10, 30, 50):
         raise HTTPException(400, "max_position must be 10, 30 or 50")
@@ -321,12 +294,8 @@ async def list_scans(
     user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    link = db.query(UserClient).filter(
-        UserClient.user_id == user.id,
-        UserClient.client_id == client_id,
-    ).first()
-    if not link:
-        raise HTTPException(403, "Access denied")
+    from services.access import check_client_access
+    check_client_access(client_id, user, db)
 
     scans = db.query(Scan).options(joinedload(Scan.focus_brand)).filter(
         Scan.client_id == client_id,

@@ -118,16 +118,17 @@ async def create_checkout(request: Request, req: CheckoutRequest, user=Depends(g
     client = db.query(Client).filter(Client.id == req.client_id).first()
     if not client:
         raise HTTPException(404, "Client not found")
-    # Verify user has access to this client
-    link = db.query(UserClient).filter(UserClient.user_id == user.id, UserClient.client_id == client.id).first()
-    if not link:
+    # Phase E.C.2 — delegate to services/access so org_user_clients counts too.
+    from services.access import get_user_client_role
+    role = get_user_client_role(str(client.id), user, db)
+    if role is None:
         raise HTTPException(403, "Access denied")
     # H6: only owners can spend money. Editors and viewers can browse pricing
     # but not initiate a Stripe Checkout that creates a real charge.
-    if link.role != "owner":
+    if role != "owner":
         raise HTTPException(
             403,
-            f"Only an owner can purchase credits (your role: '{link.role}')",
+            f"Only an owner can purchase credits (your role: '{role}')",
         )
 
     # Create or reuse Stripe customer
@@ -219,9 +220,8 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
 @router.get("/credits/{client_id}")
 async def get_credits(client_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
     """Get current credit balances for a client."""
-    link = db.query(UserClient).filter(UserClient.user_id == user.id, UserClient.client_id == client_id).first()
-    if not link:
-        raise HTTPException(403, "Access denied")
+    from services.access import check_client_access
+    check_client_access(client_id, user, db)
     return {
         "scan": get_credit_balance(client_id, "scan", db),
         "content": get_credit_balance(client_id, "content", db),
@@ -231,9 +231,8 @@ async def get_credits(client_id: str, user=Depends(get_current_user), db: Sessio
 @router.get("/credits/{client_id}/history")
 async def get_credit_history(client_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
     """Get credit transaction history for a client."""
-    link = db.query(UserClient).filter(UserClient.user_id == user.id, UserClient.client_id == client_id).first()
-    if not link:
-        raise HTTPException(403, "Access denied")
+    from services.access import check_client_access
+    check_client_access(client_id, user, db)
     entries = (
         db.query(ClientCredit)
         .filter(ClientCredit.client_id == client_id)

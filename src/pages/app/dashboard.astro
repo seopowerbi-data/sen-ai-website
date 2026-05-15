@@ -21,9 +21,10 @@ let scans = [];
 let scanCredits = 0;
 let error = null;
 
+const activeOrgCookie = Astro.cookies.get('active_organization_id')?.value;
+const upstreamCookie = activeOrgCookie ? `token=${token}; active_organization_id=${activeOrgCookie}` : `token=${token}`;
+
 try {
-  const activeOrgCookie = Astro.cookies.get('active_organization_id')?.value;
-  const upstreamCookie = activeOrgCookie ? `token=${token}; active_organization_id=${activeOrgCookie}` : `token=${token}`;
   const clientsRes = await fetch('http://api:8000/api/clients/', {
     headers: { Cookie: upstreamCookie },
     signal: AbortSignal.timeout(3000),
@@ -64,8 +65,24 @@ try {
   }
 } catch {}
 
-// First-time user → redirect to onboarding
-if (scans.length === 0) {
+// First-time user → redirect to onboarding.
+// Phase E.C.2 — skip the wizard for multi-org users : if they belong to 2+
+// orgs they have definitely been onboarded already, and a freshly-switched
+// empty workspace is just empty, not a sign they need the wizard. Without
+// this guard, switching to an empty agency org traps the user on /welcome
+// (which has no org switcher in its layout).
+let orgCount = 1;
+try {
+  const orgsRes = await fetch('http://api:8000/api/organizations/', {
+    headers: { Cookie: upstreamCookie },
+    signal: AbortSignal.timeout(3000),
+  });
+  if (orgsRes.ok) {
+    const orgs = await orgsRes.json();
+    orgCount = Array.isArray(orgs) ? orgs.length : 1;
+  }
+} catch {}
+if (scans.length === 0 && orgCount < 2) {
   return Astro.redirect('/welcome');
 }
 
