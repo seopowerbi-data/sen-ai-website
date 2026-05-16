@@ -60,7 +60,18 @@ def log_llm_usage(
     client_id: str | None = None,
     error: bool = False,
 ) -> None:
-    """Insert a row into llm_usage_log. Fire-and-forget — never raises."""
+    """Insert a row into llm_usage_log.
+
+    Stays best-effort (swallows DB failure) for one specific reason : many
+    callers fire this from inside an `except` block on the LLM call itself.
+    Propagating a flush error there would mask the real provider error with
+    a meaningless DB-side traceback.
+
+    Changed from `logger.warning` to `logger.exception` so the failure
+    surfaces in Sentry with a stack trace — the budget cap relies on these
+    rows being present (Sprint 2 — services/llm_budget.py), so a silently
+    dropped row is a budget-cap correctness bug.
+    """
     try:
         from models import LlmUsageLog
 
@@ -80,5 +91,7 @@ def log_llm_usage(
             error=error,
         ))
         db.flush()
-    except Exception as e:
-        logger.warning(f"Failed to log LLM usage: {e}")
+    except Exception:
+        logger.exception(
+            "Failed to log LLM usage — budget cap may underestimate today's spend"
+        )

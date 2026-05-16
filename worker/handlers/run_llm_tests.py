@@ -32,6 +32,13 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     if not scan:
         raise RuntimeError("Scan not found")
 
+    # Cap-then-call : a full LLM-test pass runs ~$0.10-0.30 across providers
+    # × questions × brand_analyzer. Project $0.30 (conservative upper bound).
+    # If this trips, the scan retries — operator response is to bump the
+    # LLM_DAILY_COST_CAP_USD or wait for UTC midnight reset.
+    from services.llm_budget import assert_within_budget
+    assert_within_budget(scan.client_id, db, projected_cost_usd=0.30)
+
     # Only run questions whose persona is ALSO active (toggling a persona off
     # excludes all its questions, even if individual questions are still is_active=True)
     questions = (

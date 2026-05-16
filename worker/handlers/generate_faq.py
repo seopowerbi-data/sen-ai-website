@@ -115,6 +115,14 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
             f"page and pick a URL on your site that should host this FAQ."
         )
 
+    # Cap-then-call : a FAQ runs ~$0.005 ; pass a defensive $0.05 projection
+    # so a near-cap client doesn't trip mid-call. Raises BudgetExceeded —
+    # propagated to the worker retry chain (will retry up to max_attempts,
+    # then refund the content_credit via CONTENT_ITEM_JOB_TYPES branch).
+    from services.llm_budget import assert_within_budget
+    client_id_for_budget = item.scan.client_id if item.scan else None
+    assert_within_budget(client_id_for_budget, db, projected_cost_usd=0.05)
+
     # Mark as generating so the UI can show a spinner state if it polls
     item.status = "generating"
     db.commit()

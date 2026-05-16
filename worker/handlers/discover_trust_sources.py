@@ -83,6 +83,11 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
         )
         return {"status": "skipped", "reason": "fresh"}
 
+    # Cap-then-call : trust-sources discovery runs ~$0.03 (single OpenAI
+    # web_search). Project $0.05 for safety.
+    from services.llm_budget import assert_within_budget
+    assert_within_budget(client_id, db, projected_cost_usd=0.05)
+
     if not settings.openai_api_key:
         logger.warning(
             "OPENAI_API_KEY not configured — cannot discover trust sources"

@@ -71,6 +71,10 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
     if not scan:
         raise ValueError(f"Scan {item.scan_id} not found")
 
+    # Cap-then-call : refresh runs ~$0.04 across OpenAI + Gemini. Project $0.05.
+    from services.llm_budget import assert_within_budget
+    assert_within_budget(scan.client_id, db, projected_cost_usd=0.05)
+
     q_text = (item.target_question or "").strip()
     if not q_text:
         logger.info(f"refresh_ai_snapshot: item {item_id} has no target_question")

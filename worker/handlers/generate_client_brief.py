@@ -224,6 +224,11 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
         logger.info(f"Brief for client {client_id} already edited by user — skipping")
         return {"status": "skipped", "reason": "user_edited"}
 
+    # Cap-then-call : brief runs ~$0.02-0.05 with OpenAI web_search +
+    # Claude fallback. Project $0.10 for safety.
+    from services.llm_budget import assert_within_budget
+    assert_within_budget(client_id, db, projected_cost_usd=0.10)
+
     primary_ids = list(client.primary_brand_ids or [])
     primary_brands = []
     if primary_ids:
