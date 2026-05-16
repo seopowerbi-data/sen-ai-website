@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from models import ClientCredit, Job, SessionLocal
+from services.healthcheck import ping_heartbeat, ping_t14_sweep
 from services.sentry_setup import init_sentry
 
 # Sentry init at import time so import-time errors (handler registry, etc.)
@@ -479,6 +480,12 @@ def enqueue_post_publish_measurements() -> None:
     finally:
         db.close()
 
+    # Liveness ping outside the try/except so a DB blip doesn't suppress the
+    # "cron ran" signal — but still inside the throttle gate above, so it
+    # fires at most once per POST_PUBLISH_SCAN_INTERVAL_SECONDS. No-op if
+    # HEALTHCHECK_T14_URL is unset.
+    ping_t14_sweep()
+
 
 def poll_and_execute():
     """Pick one pending job and execute it."""
@@ -636,6 +643,7 @@ def main():
 
     while True:
         try:
+            ping_heartbeat()  # throttled to 5min; no-op if HEALTHCHECK_WORKER_URL unset
             cleanup_stuck_jobs()  # cheap no-op except every CLEANUP_INTERVAL_SECONDS
             enqueue_post_publish_measurements()  # Pilier 7 T+14 sweep, every 1h
             had_job = poll_and_execute()
