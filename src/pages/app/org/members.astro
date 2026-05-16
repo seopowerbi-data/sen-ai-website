@@ -229,7 +229,7 @@ function roleLabel(r: string): string {
                     <Tip id="org_role_column" position="bottom"><span class="border-b border-dotted border-gray-400 cursor-help">Org role</span></Tip>
                   </th>
                   {orgDetail.clients.map(c => (
-                    <th class="px-3 py-3 text-left font-medium whitespace-nowrap max-w-[160px] truncate" title={c.name}>
+                    <th class="px-3 py-3 text-left font-medium whitespace-nowrap max-w-[160px] truncate">
                       <Tip id="client_role_column" position="bottom"><span class="border-b border-dotted border-gray-400 cursor-help">{c.name}</span></Tip>
                     </th>
                   ))}
