@@ -455,8 +455,15 @@ def _filter_candidate_domain(
     if is_universal_authority_tld(domain):
         return False, "gov_authority"
 
-    if domain in trust_domains_set:
-        return False, "trust_institutional"
+    # Trust domains : subdomain-aware match (fr.wikipedia.org matches
+    # wikipedia.org in the trust list). Exact-match here would let language
+    # subdomains slip through — observed on PF backfill 2026-05-17 where
+    # fr.wikipedia.org was picked as a candidate.
+    for trusted in trust_domains_set:
+        if not trusted:
+            continue
+        if domain == trusted or domain.endswith("." + trusted):
+            return False, "trust_institutional"
 
     # Universal cross-vertical patterns (ecommerce / social / blog / forum).
     # We pass competitor_domains=None to is_excluded_url since we've already
