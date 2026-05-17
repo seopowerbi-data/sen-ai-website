@@ -126,6 +126,13 @@ class ClientBrand(Base):
     # Phase D sitemap config (migration 028). See api/migrations/028_*.sql.
     sitemap_urls_override = Column(JSONB, nullable=False, default=list)
     locale_path_prefix = Column(Text)
+    # Phase C.1 multi-vertical article generator (migration 032).
+    # See api/migrations/032_client_brand_vertical_metadata.sql.
+    # PARITÉ obligatoire avec api/models.py — la duplication worker/models.py
+    # vs api/models.py est un foot-gun connu : oublier d'updater l'un fait
+    # crasher l'autre avec AttributeError sur la nouvelle colonne.
+    expert_section_paths = Column(JSONB, nullable=False, default=list)
+    product_lines = Column(JSONB, nullable=False, default=list)
 
     parent = relationship("ClientBrand", remote_side=[id])
 
