@@ -231,9 +231,53 @@ def pick_media_candidates(
 
     logger.info(
         f"media_picker: question={question_id} → {len(rows)} raw citations, "
-        f"{len(candidates)} candidates after filter "
+        f"{len(candidates)} candidates after universal filter "
         f"(dropped: {dict(drop_reasons) if drop_reasons else 'none'})"
     )
+
+    if not candidates:
+        return []
+
+    # ── 3.5. Site-type classifier filter (C.1.4). Keep only BUYABLE types
+    # (Health & Beauty Media + Blog + News). Drops Brand sites, Government,
+    # Medical Reference, Encyclopedia, Forum, E-commerce — the seo-llm
+    # `BUYABLE_SITE_TYPES` semantic ported verbatim.
+    #
+    # Lazy classification : unseen domains trigger a Gemini batch call (sub-3s
+    # for 30 domains). Cached forever in domain_classifications table — second
+    # call on the same domain is a sub-ms DB lookup. Cross-client cache : a
+    # Brand site is a Brand site regardless of which client surfaced it, so
+    # the cache compounds value over time.
+    #
+    # Stashes `site_type` on each candidate so the UI can render an explicit
+    # chip ("Health Media", "Blog", "News") for transparency.
+    try:
+        from services.domain_classifier import (
+            BUYABLE_SITE_TYPES, classify_domains, is_buyable,
+        )
+        domains_to_classify = [c["domain"] for c in candidates]
+        classifications = classify_domains(domains_to_classify, db)
+        filtered_by_type: list[dict] = []
+        type_drops: dict[str, int] = defaultdict(int)
+        for c in candidates:
+            site_type = classifications.get(c["domain"])
+            c["site_type"] = site_type or "Other"
+            if is_buyable(site_type):
+                filtered_by_type.append(c)
+            else:
+                type_drops[(site_type or "Other").lower().replace(" & ", "_").replace(" ", "_")] += 1
+        if type_drops:
+            logger.info(
+                f"media_picker: site_type filter dropped {sum(type_drops.values())} "
+                f"candidates ({dict(type_drops)}). Kept {len(filtered_by_type)} "
+                f"buyable (set: {sorted(BUYABLE_SITE_TYPES)})"
+            )
+        candidates = filtered_by_type
+    except Exception:
+        logger.exception(
+            "media_picker: classifier filter failed — falling back to keeping "
+            "all universal-filter-passed candidates (no site_type guarantee)"
+        )
 
     if not candidates:
         return []
@@ -582,12 +626,38 @@ def _float_or_none(v) -> float | None:
 
 
 def _score(c: dict) -> float:
-    """relevance_score = citation_count × log(da + 1) - price_eur / 1000.
+    """relevance_score = citation_count × log(da+1) + linkfinder_bonus − price/1000.
 
-    See module docstring "Ranking" section for the rationale.
-    Returns 0.0 for a candidate with no citation_count, no DA, no price.
+    Rationale (see module docstring "Ranking" + the C.1.3 + C.1.4 evolution):
+
+      - `citation_count × log(da+1)` — citations are the relevance signal,
+        DA the authority modifier (diminishing returns via log).
+
+      - `linkfinder_bonus` (+2.0 when present in LinkFinder catalog) —
+        BUG FIX 2026-05-17 : without this bonus, a candidate with price
+        but da=None scored lower than a candidate with no LinkFinder
+        data at all (both scored ~0, but the priced one paid the price
+        penalty). LinkFinder catalog presence is a strong positive signal
+        (the platform sells placements on that media), so it deserves a
+        baseline score lift regardless of DA value.
+
+      - `− price / 1000` — modest penalty for premium medias, only applied
+        when we know the price (skip the penalty when LinkFinder has price=null).
+
+    Examples for ta capture's 3 candidates (citation_count=1 each) :
+      - glowupbyparis (no LF data) : 1×log(1) = 0
+      - testsdeproduits (no LF data) : 1×log(1) = 0
+      - parisselectbook (LF: €532, da=None) : 1×log(1) + 2.0 − 0.532 = 1.468 ✓ wins
     """
     cc = c.get("citation_count") or 0
-    da = c.get("da") or 0
-    price = c.get("price_eur") or 0.0
-    return cc * math.log(da + 1) - (price / 1000.0)
+    da_val = c.get("da")
+    price_val = c.get("price_eur")
+    da = da_val or 0
+    price = price_val or 0.0
+    in_lf = (da_val is not None) or (price_val is not None)
+    base = cc * math.log(da + 1)
+    if in_lf:
+        base += 2.0
+    if price > 0:
+        base -= price / 1000.0
+    return base
