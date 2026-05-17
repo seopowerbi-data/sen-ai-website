@@ -8,10 +8,23 @@ materialize.
 
 ## What gets materialized
 
-For now, only **FAQ opportunities with priority 'critique' or 'haute'**. This
-keeps the Kanban readable (Miller's Law, ~5-10 cards per scan) and aligns
-with the Phase B scope (only `generate_faq` handler is wired). Article and
-netlinking materialization come later when their handlers ship (Phase C).
+Opportunities with priority 'critique' or 'haute' AND a recommended_action
+mapped to a known content_type (see `_CONTENT_TYPE_BY_ACTION`) :
+
+  - `recommended_action='faq'`        → `content_type='faq'`
+  - `recommended_action='netlinking'` → `content_type='netlinking_article'`
+                                        (Phase C.1 — handler wired)
+
+Both go through `_auto_suggest_leads` (per-item LEAD brand selection via
+Claude). FAQ items additionally go through `_auto_match_target_urls` to
+suggest a page on the brand's own site. **Netlinking items skip the matcher
+entirely** : the article will be published on a third-party media domain
+(not the user's brand site), so a brand-site sitemap match makes no sense.
+The user fills `target_url` manually on the validation page (URL of the
+media partner where the article will be published).
+
+`content_update` opportunities (priority 'haute' fallback) are NOT
+materialized — no handler exists for them yet.
 
 ## target_url policy — auto-suggest via FAQPageMatcher + manual fallback
 
@@ -60,11 +73,23 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 
-# Priority threshold for FAQ materialization. Tied to generate_opportunities.py
+# Priority threshold for materialization. Tied to generate_opportunities.py
 # scoring : 'critique' = brand absent + competitors present, 'haute' = cited
 # but behind competitor. 'moyenne' opportunities are skipped because the user
-# already ranks reasonably and the ROI of producing a FAQ is unclear.
-_FAQ_PRIORITIES = ("critique", "haute")
+# already ranks reasonably and the ROI of producing content is unclear.
+_CONTENT_PRIORITIES = ("critique", "haute")
+# Alias kept for any external import; same value.
+_FAQ_PRIORITIES = _CONTENT_PRIORITIES
+
+# Map opportunity action → ScanContentItem.content_type. Extend this dict (+
+# wire the handler in worker/main.py + api dispatcher) to materialize new
+# content types. NB: generate_opportunities.py uses the SHORT form for the
+# action label ("netlinking") while ScanContentItem uses the LONG form
+# ("netlinking_article") — this map is the translation table between the two.
+_CONTENT_TYPE_BY_ACTION = {
+    "faq": "faq",
+    "netlinking": "netlinking_article",
+}
 
 
 def _resolve_lead_brand(scan, db, item=None):
@@ -464,7 +489,13 @@ def _strip_tracking_params(url: str) -> str:
 
 
 def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
-    """Read ScanOpportunity rows + create ScanContentItem rows for FAQ targets."""
+    """Read ScanOpportunity rows + create ScanContentItem rows.
+
+    Handles both FAQ (`recommended_action='faq'` → `content_type='faq'`) and
+    netlinking article (`recommended_action='netlinking'` →
+    `content_type='netlinking_article'`) opportunities. See module docstring
+    for the matcher-skip rationale for netlinking items.
+    """
     from models import (
         Scan,
         ScanContentItem,
@@ -477,19 +508,29 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     if not scan:
         raise RuntimeError(f"Scan {scan_id} not found")
 
-    # Read FAQ-eligible opportunities for this scan.
+    # Read all materializable opportunities for this scan (FAQ + netlinking).
+    eligible_actions = list(_CONTENT_TYPE_BY_ACTION.keys())
     opps = (
         db.query(ScanOpportunity)
         .filter(
             ScanOpportunity.scan_id == scan_id,
-            ScanOpportunity.priority.in_(_FAQ_PRIORITIES),
-            ScanOpportunity.recommended_action == "faq",
+            ScanOpportunity.priority.in_(_CONTENT_PRIORITIES),
+            ScanOpportunity.recommended_action.in_(eligible_actions),
         )
         .all()
     )
     if not opps:
-        logger.info(f"materialize_content_items: 0 FAQ opportunities for scan {scan_id}")
-        return {"materialized": 0, "skipped_existing": 0, "auto_matched": 0, "is_competitor_scan": False}
+        logger.info(
+            f"materialize_content_items: 0 eligible opportunities "
+            f"(actions in {eligible_actions}) for scan {scan_id}"
+        )
+        return {
+            "materialized": 0,
+            "materialized_by_type": {},
+            "skipped_existing": 0,
+            "auto_matched": 0,
+            "is_competitor_scan": False,
+        }
 
     competitor = is_competitor_scan(scan, db)
     logger.info(
@@ -497,17 +538,23 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
         f"is_competitor={competitor}, eligible_opps={len(opps)}"
     )
 
-    # Pre-load existing FAQ ContentItems for this scan to dedupe by target_question.
+    # Pre-load existing ContentItems for this scan to dedupe by
+    # (content_type, target_question). Allows the same question to have BOTH
+    # a FAQ and a netlinking_article variant if generate_opportunities ever
+    # emits both actions for the same question — unlikely today (action is
+    # exclusive per the ternary in generate_opportunities.py:84) but the
+    # tuple-key dedupe is the correct semantic and future-proof.
     existing = (
         db.query(ScanContentItem)
         .filter(
             ScanContentItem.scan_id == scan_id,
-            ScanContentItem.content_type == "faq",
+            ScanContentItem.content_type.in_(_CONTENT_TYPE_BY_ACTION.values()),
         )
         .all()
     )
-    existing_questions = {
-        (item.target_question or "").strip().lower() for item in existing if item.target_question
+    existing_keys: set[tuple[str, str]] = {
+        (item.content_type, (item.target_question or "").strip().lower())
+        for item in existing if item.target_question
     }
 
     # Phase 1: create ContentItem rows (without target_url yet) so they get UUIDs
@@ -521,15 +568,26 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
             logger.debug(f"materialize: skip opp {opp.id} — no question text")
             continue
 
+        ct = _CONTENT_TYPE_BY_ACTION.get(opp.recommended_action)
+        if not ct:
+            # Defensive : the IN filter above already guarantees this can't
+            # happen, but keep the guard so future actions added to the table
+            # don't silently produce items with a stale content_type.
+            logger.warning(
+                f"materialize: opp {opp.id} action='{opp.recommended_action}' "
+                f"not in _CONTENT_TYPE_BY_ACTION — skipping"
+            )
+            continue
+
         q_text = question.question.strip()
         q_key = q_text.lower()
-        if q_key in existing_questions:
+        if (ct, q_key) in existing_keys:
             skipped += 1
             continue
 
         item = ScanContentItem(
             scan_id=scan_id,
-            content_type="faq",
+            content_type=ct,
             topic_name=opp.topic_name,
             persona_name=opp.persona_name,
             target_url=None,
@@ -544,7 +602,7 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
         )
         db.add(item)
         new_items.append((item, q_text, opp.topic_name))
-        existing_questions.add(q_key)
+        existing_keys.add((ct, q_key))
 
     if not new_items:
         db.commit()
@@ -554,6 +612,7 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
         )
         return {
             "materialized": 0,
+            "materialized_by_type": {},
             "skipped_existing": skipped,
             "auto_matched": 0,
             "is_competitor_scan": competitor,
@@ -565,8 +624,13 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     # Phase 1.5: auto-suggest per-item LEAD brand via 1 batched Claude call.
     # Skipped when client has 0 or 1 primary brand with a domain (no choice to
     # make). Sets item.promoted_brand_ids so Phase 2's _resolve_target_site
-    # picks the right domain for FAQPageMatcher. content_metadata records
-    # provenance so the UI can show an "Auto" chip the user can override.
+    # picks the right domain for FAQPageMatcher (FAQ items) and the article
+    # handler's BrandResolver injection. content_metadata records provenance
+    # so the UI can show an "Auto" chip the user can override.
+    #
+    # Runs on ALL items regardless of content_type — LEAD brand selection is
+    # relevant for both FAQ (where it drives the matcher target_site) and
+    # netlinking_article (where it drives the promoted brand in the article).
     lead_suggestions = _auto_suggest_leads(new_items, scan, db)
     auto_lead_count = 0
     if lead_suggestions:
@@ -587,12 +651,19 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
         # Re-flush so Phase 2 sees the override on each item.
         db.flush()
 
-    # Phase 2: auto-suggest target_url. Two-layer cascade now (Phase D Day 4) :
-    # sitemap-index semantic matcher first, FAQPageMatcher web_search fallback.
-    matches = _auto_match_target_urls(new_items, scan, db)
+    # Phase 2: auto-suggest target_url. ONLY for FAQ items.
+    #
+    # Netlinking articles get published on third-party media domains (e.g.
+    # doctissimo.fr), not on the user's brand site, so neither the sitemap-
+    # index matcher (which scans brand-site corpora) nor the FAQPageMatcher
+    # web_search (which targets brand sub-paths) yields a meaningful result.
+    # The user fills `target_url` manually on the validation page with the
+    # URL of the media partner where the article will be published.
+    faq_items = [t for t in new_items if t[0].content_type == "faq"]
+    matches = _auto_match_target_urls(faq_items, scan, db) if faq_items else {}
     auto_matched = 0
     sitemap_matched = 0
-    for item, _, _ in new_items:
+    for item, _, _ in faq_items:
         m = matches.get(str(item.id))
         if m and m.get("target_page_url"):
             item.target_url = m["target_page_url"]
@@ -612,10 +683,18 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
 
     db.commit()
 
+    # Per-type counts for the log + return payload — useful when scanning
+    # logs to spot a regression where one content_type stops materializing.
+    by_type: dict[str, int] = {}
+    for item, _, _ in new_items:
+        by_type[item.content_type] = by_type.get(item.content_type, 0) + 1
+
     logger.info(
         f"materialize_content_items done: scan={scan_id}, "
-        f"materialized={len(new_items)}, skipped_existing={skipped}, "
-        f"auto_matched={auto_matched} (sitemap_index={sitemap_matched}, "
+        f"materialized={len(new_items)} {by_type}, "
+        f"skipped_existing={skipped}, "
+        f"auto_matched={auto_matched}/{len(faq_items)} FAQ "
+        f"(sitemap_index={sitemap_matched}, "
         f"auto_suggest={auto_matched - sitemap_matched}), "
         f"pending_user={len(new_items) - auto_matched}, "
         f"auto_lead_suggested={auto_lead_count}, "
@@ -624,6 +703,7 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
 
     return {
         "materialized": len(new_items),
+        "materialized_by_type": by_type,
         "skipped_existing": skipped,
         "auto_matched": auto_matched,
         "sitemap_matched": sitemap_matched,
