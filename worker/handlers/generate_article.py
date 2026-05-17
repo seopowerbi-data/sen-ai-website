@@ -406,6 +406,33 @@ def _make_workspace_aware_class():
         ):
             super().__init__(writing_provider=writing_provider, **kwargs)
 
+            # YTG API hard-limits `query` to 150 characters (HTTP 400 with
+            # "The query must not be greater than 150 characters" otherwise).
+            # SaaS-generated questions are conversational ("J'ai entendu dire
+            # que… ?") and routinely hit 150-200+ chars, vs seo-llm CLI's
+            # PF-curated short SEO keyword queries that stayed under the cap.
+            # Patch the create_guide method on this instance only to truncate
+            # at word boundary BEFORE the YTG request. The rest of the
+            # pipeline (SERP analysis, brand_content search, content gen)
+            # still sees the FULL question_text passed via opportunity dict.
+            _orig_create_guide = self.ytg.create_guide
+
+            def _create_guide_truncated(query, *args, **kwargs):
+                _YTG_MAX = 150
+                if len(query) > _YTG_MAX:
+                    truncated = query[:_YTG_MAX]
+                    if " " in truncated:
+                        truncated = truncated.rsplit(" ", 1)[0]
+                    logger.info(
+                        f"YTG query truncated {len(query)}→{len(truncated)} "
+                        f"chars (API hard limit 150). Rest of pipeline uses "
+                        f"full question_text."
+                    )
+                    query = truncated
+                return _orig_create_guide(query, *args, **kwargs)
+
+            self.ytg.create_guide = _create_guide_truncated
+
             self._ux_workspace_brief_text = workspace_brief_text or ""
             self._ux_promoted_brand_names = list(promoted_brand_names or [])
             self._ux_promoted_lead_brand_name = (
