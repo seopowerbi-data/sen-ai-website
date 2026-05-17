@@ -141,6 +141,12 @@ def test_question(question: str, persona: dict, llm_client: LLMClient,
         "duration_ms": duration_ms,
         "input_tokens": response.get("usage", {}).get("prompt_tokens", 0),
         "output_tokens": response.get("usage", {}).get("completion_tokens", 0),
+        # Phase C.1.5 — fan-out ground truth : pull the explicit search queries
+        # the LLM actually issued during this response. seo_llm.LLMClient
+        # already extracts them from grounding_metadata (Gemini) or
+        # output[].action.queries (OpenAI) and returns them under
+        # 'web_search_queries'. Empty list when grounding wasn't triggered.
+        "web_search_queries": response.get("web_search_queries", []),
     }
 
 
@@ -186,7 +192,17 @@ def test_question_openai_direct(question: str, persona: dict, target_domain: str
     # Extract grounding URLs (mirror LLMClient._generate_openai_responses logic)
     grounding_sources = []
     seen_urls = set()
+    # Phase C.1.5 — also extract web_search_queries (the explicit search
+    # queries OpenAI's web_search tool issued). Mirror's seo_llm's LLMClient
+    # extraction (web_search_call.action.queries) since we bypass LLMClient
+    # in this direct path for latency.
+    web_search_queries: list[str] = []
     for item in (response.output or []):
+        if hasattr(item, "type") and item.type == "web_search_call":
+            action = getattr(item, "action", None)
+            queries = getattr(action, "queries", None) if action else None
+            if queries:
+                web_search_queries.extend(q for q in queries if q)
         if hasattr(item, "type") and item.type == "message":
             for content_block in getattr(item, "content", []):
                 for ann in getattr(content_block, "annotations", []):
@@ -247,4 +263,7 @@ def test_question_openai_direct(question: str, persona: dict, target_domain: str
         "duration_ms": duration_ms,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        # Phase C.1.5 — fan-out ground truth (see test_question() return for
+        # docstring). Empty list = web_search tool didn't emit queries.
+        "web_search_queries": web_search_queries,
     }

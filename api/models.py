@@ -441,6 +441,11 @@ class ScanQuestion(Base):
     question = Column(Text, nullable=False)
     type_question = Column(String(30))
     is_active = Column(Boolean, default=True)
+    # Phase C.1.5 (migration 034) — cached fan-out queries selected from
+    # cross-provider LLM search queries. Index [0] = primary (sent to YTG).
+    # Populated lazily by services.fan_out_extractor on first article gen.
+    # PARITÉ obligatoire avec worker/models.py (foot-gun #18).
+    fan_out_queries = Column(JSONB, nullable=False, default=list)
 
     persona = relationship("ScanPersona", back_populates="questions")
 
@@ -560,6 +565,12 @@ class ScanLLMResult(Base):
     input_tokens = Column(Integer)
     output_tokens = Column(Integer)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Phase C.1.5 (migration 034) — per-provider list of search queries the
+    # LLM actually issued during this response. Gemini grounding_metadata.
+    # web_search_queries / OpenAI output[].action.queries (Claude future).
+    # Empty list = grounding not triggered. Consumed by fan_out_extractor.
+    # PARITÉ obligatoire avec worker/models.py (foot-gun #18).
+    web_search_queries = Column(JSONB, nullable=False, default=list)
 
 
 class ScanOpportunity(Base):

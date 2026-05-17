@@ -406,32 +406,36 @@ def _make_workspace_aware_class():
         ):
             super().__init__(writing_provider=writing_provider, **kwargs)
 
-            # YTG API hard-limits `query` to 150 characters (HTTP 400 with
-            # "The query must not be greater than 150 characters" otherwise).
-            # SaaS-generated questions are conversational ("J'ai entendu dire
-            # que… ?") and routinely hit 150-200+ chars, vs seo-llm CLI's
-            # PF-curated short SEO keyword queries that stayed under the cap.
-            # Patch the create_guide method on this instance only to truncate
-            # at word boundary BEFORE the YTG request. The rest of the
-            # pipeline (SERP analysis, brand_content search, content gen)
-            # still sees the FULL question_text passed via opportunity dict.
+            # Phase C.1.5 — YTG receives a FAN-OUT query (clean SEO format
+            # 30-80c, extracted from real LLM web_search_queries) instead of
+            # the conversational long question. The fan-out extraction +
+            # selection happens in execute() BEFORE constructing this
+            # subclass, and opportunity["question_text"] is set to the
+            # primary fan-out (which IS short by construction).
+            #
+            # We keep a defensive YTG truncate as a SAFETY NET only — fires
+            # when the primary fan-out is somehow still > 150c (shouldn't
+            # happen, but Haiku synthesis edge cases are possible).
+            #
+            # See `project_phase_c1_article_handler.md` section C.1.5 for the
+            # full architecture (fan_out_extractor B1+B2 hybrid + ranking).
             _orig_create_guide = self.ytg.create_guide
 
-            def _create_guide_truncated(query, *args, **kwargs):
+            def _create_guide_safety_truncate(query, *args, **kwargs):
                 _YTG_MAX = 150
                 if len(query) > _YTG_MAX:
                     truncated = query[:_YTG_MAX]
                     if " " in truncated:
                         truncated = truncated.rsplit(" ", 1)[0]
-                    logger.info(
-                        f"YTG query truncated {len(query)}→{len(truncated)} "
-                        f"chars (API hard limit 150). Rest of pipeline uses "
-                        f"full question_text."
+                    logger.warning(
+                        f"YTG safety-net truncate: query {len(query)}→{len(truncated)}c. "
+                        f"This shouldn't happen post-C.1.5 (fan-outs are 30-80c by "
+                        f"construction). Investigate primary fan-out selection."
                     )
                     query = truncated
                 return _orig_create_guide(query, *args, **kwargs)
 
-            self.ytg.create_guide = _create_guide_truncated
+            self.ytg.create_guide = _create_guide_safety_truncate
 
             self._ux_workspace_brief_text = workspace_brief_text or ""
             self._ux_promoted_brand_names = list(promoted_brand_names or [])
@@ -989,8 +993,52 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
                 f"get_competitor_domains_for_scan failed for scan {item.scan.id}"
             )
 
-    # ── Synthetic opportunity ────────────────────────────────────────
-    opportunity = _build_synthetic_opportunity(item)
+    # ── Fan-out extraction (Phase C.1.5) ─────────────────────────────
+    # Replaces the long conversational question with a short Google-search-
+    # style fan-out for YTG. The primary fan-out (index [0]) feeds YTG;
+    # all fan-outs (incl. primary) are passed to generate_for_opportunity
+    # via fanout_queries for content coverage + FAQ Q seeds.
+    #
+    # Fallback chain (B1 → B2 → truncated question) handled inside
+    # extract_or_get_cached. Returns empty list ONLY when there's no
+    # scan_llm_results data at all for this question (very rare).
+    from services.fan_out_extractor import extract_or_get_cached
+
+    fanouts: list[str] = []
+    question_id_for_extract = _resolve_scan_question_id(item, db)
+    if question_id_for_extract:
+        try:
+            fanouts = extract_or_get_cached(
+                question_id_for_extract, str(item.scan_id), db,
+            )
+        except Exception:
+            logger.exception(
+                f"fan_out_extractor crashed for question {question_id_for_extract} "
+                f"— falling back to truncated question_text"
+            )
+
+    if fanouts:
+        # Use primary fan-out as YTG-bound query. The rest of the pipeline
+        # (SERP analysis, brand_content fetch, content gen prompts) ALSO sees
+        # this short fan-out via opportunity["question_text"] — that's the
+        # tradeoff for not patching all the touch-points. SERP analysis on a
+        # clean SEO query is actually BETTER than on a conversational long
+        # question (cleaner top-10 SERP, more representative grammes).
+        primary_fanout = fanouts[0]
+        logger.info(
+            f"fan_out_extractor: {len(fanouts)} fan-outs for question "
+            f"{question_id_for_extract}, primary='{primary_fanout[:60]}' "
+            f"(used for YTG + SERP). Full conversational question preserved "
+            f"in item.target_question for FAQ UI + scan_llm_tests."
+        )
+        opportunity = _build_synthetic_opportunity(item, ytg_query=primary_fanout)
+    else:
+        logger.warning(
+            f"fan_out_extractor returned empty for item {item_id} "
+            f"(no scan_llm_results captured yet ?) — falling back to question_text "
+            f"with YTG safety-net truncate."
+        )
+        opportunity = _build_synthetic_opportunity(item)
 
     logger.info(
         f"Generating article for content_item {item_id} "
@@ -999,7 +1047,8 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
         f"promote={len(promoted_brand_names)}, "
         f"exclude={len(excluded_brand_names)}, "
         f"trust={len(trust_domains)}, "
-        f"competitor={len(competitor_domains)})"
+        f"competitor={len(competitor_domains)}, "
+        f"fanouts={len(fanouts)})"
     )
 
     # ── Generate ─────────────────────────────────────────────────────
@@ -1035,7 +1084,14 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
         with _silence_rich_console():
             result = generator.generate_for_opportunity(
                 opportunity=opportunity,
-                fanout_queries=None,
+                # Phase C.1.5 — pass ALL fan-outs (incl. primary) to the
+                # writer. The seo_llm pipeline uses fanout_queries for :
+                #   - content gen prompt injection (_format_fanout_section)
+                #     so the article covers each sub-intent explicitly
+                #   - post-gen coverage check (fanout_coverage / covered /
+                #     missed in result dict)
+                #   - FAQ Schema.org Q seeds (first 5 fan-outs become FAQ Qs)
+                fanout_queries=fanouts or None,
                 faq_file=None,
                 generate_image=False,
             )
@@ -1098,9 +1154,15 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
         "sources_count":       len(sources_used),
         "duration_ms":         duration_ms,
         "generated_at":        datetime.utcnow().isoformat(),
-        "generator_version":   "geo-section-mode-v1",
+        "generator_version":   "geo-section-mode-v2-fanout",  # bumped for C.1.5
         "writing_provider":    writing_provider,
         "guide_id":            guide_id,
+        # Phase C.1.5 — fan-outs actually used (primary at [0] = sent to YTG,
+        # rest passed to pipeline for content coverage + FAQ Q seeds).
+        # Empty list = no fan-outs extracted (rare, indicates B1+B2 both failed
+        # OR no scan_llm_results data for the question). Persisted for audit
+        # + future UI transparency in validation page.
+        "fan_outs_used":       list(fanouts or []),
     }
     # 'in_progress' implicitly dropped by overwriting content_metadata
     flag_modified(item, "content_metadata")
@@ -1145,20 +1207,49 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
 
 # ─── Synthetic-opportunity + HTML extraction helpers ───────────────────
 
-def _build_synthetic_opportunity(item) -> dict:
+def _build_synthetic_opportunity(item, ytg_query: str | None = None) -> dict:
     """Construct the opportunity dict expected by GEOContentGenerator.
 
     The `source_name` is synthetic — `_extract_brand_from_source` is
     shadowed via `_PatchedModuleFns` so source_name parsing never runs.
+
+    `ytg_query` (Phase C.1.5) : when provided, replaces the conversational
+    long question with the primary fan-out (short SEO query) for YTG
+    consumption. The full conversational question stays preserved on
+    item.target_question for the UI / FAQ Schema.org / future use cases.
+    Fallback to item.target_question when not provided (legacy/empty path).
     """
+    question_text = (ytg_query or item.target_question or item.topic_name or "").strip()
     return {
         "source_name":   f"item-{item.id}",
         "media_domain":  _extract_url_domain(item.target_url),
         "question_id":   str(item.id),
-        "question_text": (item.target_question or item.topic_name or "").strip(),
+        "question_text": question_text,
         "persona_name":  (item.persona_name or "").strip(),
         "site_type":     "",
     }
+
+
+def _resolve_scan_question_id(item, db: Session) -> str | None:
+    """Lookup ScanQuestion.id from item.target_question (case-insensitive match).
+
+    Same pattern as content_items.py:_build_competitor_snapshot. Returns
+    None when no match — caller's responsibility (falls back to truncated
+    question_text via YTG safety-net).
+    """
+    if not item.target_question:
+        return None
+    from sqlalchemy import func
+    from models import ScanQuestion
+    row = (
+        db.query(ScanQuestion.id)
+        .filter(
+            ScanQuestion.scan_id == item.scan_id,
+            func.lower(ScanQuestion.question) == item.target_question.strip().lower(),
+        )
+        .first()
+    )
+    return str(row[0]) if row else None
 
 
 def _extract_url_domain(url: str | None) -> str:

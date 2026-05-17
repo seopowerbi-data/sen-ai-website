@@ -280,6 +280,12 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
                     duration_ms=result.get("duration_ms"),
                     input_tokens=result.get("input_tokens"),
                     output_tokens=result.get("output_tokens"),
+                    # Phase C.1.5 — fan-out ground truth from the LLM's actual
+                    # web search behavior (Gemini grounding_metadata,
+                    # OpenAI web_search_call.action.queries). Consumed
+                    # downstream by services.fan_out_extractor to build the
+                    # cross-provider fan-out set for article gen.
+                    web_search_queries=result.get("web_search_queries", []),
                 ))
 
                 if result["target_cited"]:
