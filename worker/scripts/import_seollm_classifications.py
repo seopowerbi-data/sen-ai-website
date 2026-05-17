@@ -70,21 +70,31 @@ def main(csv_path: str):
 
     print(f"Ready to insert {len(df)} rows", flush=True)
 
+    # Parse created_date column once (vectorized) so we can pass real
+    # datetime objects to psycopg2 rather than wrestling with PG cast
+    # syntax inside the SQL string. NaT → None (we coalesce to NOW() server-side).
+    if "created_date" in df.columns:
+        df["created_ts"] = pd.to_datetime(df["created_date"], errors="coerce")
+    else:
+        df["created_ts"] = pd.NaT
+
     db = SessionLocal()
     try:
         inserted = 0
         skipped_existing = 0
         for _, row in df.iterrows():
+            ts = row["created_ts"]
+            ts_param = ts.to_pydatetime() if pd.notna(ts) else None
             r = db.execute(
                 text("""
                     INSERT INTO domain_classifications (domain, site_type, classified_at, model, source)
-                    VALUES (:d, :st, COALESCE(:ts::timestamp, NOW()), 'gemini-import', 'import_seollm')
+                    VALUES (:d, :st, COALESCE(:ts, NOW()), 'gemini-import', 'import_seollm')
                     ON CONFLICT (domain) DO NOTHING
                 """),
                 {
                     "d": row["domain_norm"],
                     "st": row["site_type"],
-                    "ts": str(row.get("created_date") or "") or None,
+                    "ts": ts_param,
                 },
             )
             if r.rowcount > 0:
