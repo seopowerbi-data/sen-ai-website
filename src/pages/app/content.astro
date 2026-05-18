@@ -186,11 +186,30 @@ function ageLabel(iso: string | null): string {
         <div class="flex items-center gap-2">
           <span class="text-[11px] uppercase tracking-wide font-semibold text-charcoal-light">Scan:</span>
           <select onchange="const u=new URL(window.location); this.value ? u.searchParams.set('scan_id', this.value) : u.searchParams.delete('scan_id'); window.location = u.toString();"
-                  class="text-xs border border-gray-200 rounded-md px-2 py-1 bg-white">
+                  class="text-xs border border-gray-200 rounded-md px-2 py-1 bg-white max-w-[320px]">
             <option value="">All scans</option>
-            {scans.map((s: any) => (
-              <option value={s.id} selected={scanParam === s.id}>{s.name || s.domain}</option>
-            ))}
+            {(() => {
+              // Disambiguate labels when multiple scans share the same name
+              // (common with "test 1", "test 2", etc. created during dev).
+              // Always append the domain when the name alone doesn't make
+              // the scan unique, and prepend a short id suffix when the
+              // domain ALSO collides (rare but happens).
+              const nameCount: any = {};
+              for (const s of scans) {
+                const k = ((s.name || s.domain || '') as string).trim();
+                nameCount[k] = (nameCount[k] || 0) + 1;
+              }
+              return scans.map((s: any) => {
+                const name = (s.name || '').trim();
+                const domain = (s.domain || '').trim();
+                const isAmbiguous = nameCount[name] > 1;
+                let label = name || domain;
+                if (name && isAmbiguous) {
+                  label = `${name} · ${domain || s.id.slice(0, 6)}`;
+                }
+                return <option value={s.id} selected={scanParam === s.id}>{label}</option>;
+              });
+            })()}
           </select>
         </div>
       )}
@@ -282,6 +301,32 @@ function ageLabel(iso: string | null): string {
                             ⚠ {item.content_type === 'netlinking_article' ? 'NEEDS MEDIA URL' : 'NEEDS URL'}
                           </span>
                         )}
+                        {/* Phase B Tier A — intent chip from the Haiku
+                            classifier (content_metadata.intent_category).
+                            Hidden for promotional_fit and other (no signal
+                            value). Safety categories are filtered out
+                            upstream so they normally don't appear here at
+                            all — defensive render in case a legacy item
+                            survives. */}
+                        {(() => {
+                          const cat = item.content_metadata?.intent_category;
+                          if (!cat || cat === 'promotional_fit' || cat === 'other') return null;
+                          const map = {
+                            informational_neutral: { label: 'Informational', cls: 'bg-blue-100 text-blue-800' },
+                            safety_warning:        { label: 'Safety',        cls: 'bg-amber-100 text-amber-800' },
+                            side_effects:          { label: 'Side effects',  cls: 'bg-amber-100 text-amber-800' },
+                            contre_indication:     { label: 'Contre-indication', cls: 'bg-amber-100 text-amber-800' },
+                            complaint_sav:         { label: 'SAV',           cls: 'bg-amber-100 text-amber-800' },
+                          } as const;
+                          const m = (map as any)[cat];
+                          if (!m) return null;
+                          return (
+                            <span class={`text-[9px] font-medium rounded px-1.5 py-0.5 ${m.cls}`}
+                                  title={`Question intent: ${m.label}. Classified by the scan pipeline.`}>
+                              {m.label}
+                            </span>
+                          );
+                        })()}
                         {/* Scan-domain chip — labelled by intent : on FAQ scans
                             it's the user's own brand site (where the FAQ will
                             live), on netlinking_article it's the competitor's
