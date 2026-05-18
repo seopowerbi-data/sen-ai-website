@@ -214,6 +214,7 @@ class _PatchedModuleFns:
             "_extract_brand_from_source":   gcg._extract_brand_from_source,
             "_get_pf_brands_for_pathology": gcg._get_pf_brands_for_pathology,
             "_build_brand_fallback":        gcg._build_brand_fallback,
+            "_get_media_reader_profile":    gcg._get_media_reader_profile,
             "BRAND_MAP":                    gcg.BRAND_MAP,
             "PATHOLOGY_PF_BRANDS":          gcg.PATHOLOGY_PF_BRANDS,
             "GAMME_TO_SITE":                gcg.GAMME_TO_SITE,
@@ -333,6 +334,69 @@ class _PatchedModuleFns:
         gcg.PATHOLOGY_PF_BRANDS = {}
         gcg.BRAND_MAP = {}
 
+        # C.2.3 + C.2.4 — wrap _get_media_reader_profile to blend client voice
+        # + audience + persona_name on top of the scraped media tone. This is
+        # the cleanest way to fix two seo-llm shortcomings without forking :
+        #
+        #   • Gap #3 (client_brief.voice / audience never reached the prompt) :
+        #     append the client's brand voice + target audience to the tone /
+        #     description fields the prompt template already reads.
+        #
+        #   • Gap #6 (`persona` parameter is dead code at line 5461 — line 5474
+        #     always overwrites persona_details with reader_profile.description) :
+        #     prepend the persona_name to the description so it survives the
+        #     overwrite and ends up in the prompt's "persona_details" slot.
+        #
+        # The original function (scraping homepage + 2-3 articles via Haiku,
+        # caching to disk) is preserved end-to-end : we only mutate the dict
+        # it returns. If the scrape fails and the function returns the
+        # fallback skeleton, we still inject our client context — better than
+        # nothing.
+        _original_get_media_reader_profile = self._saved["_get_media_reader_profile"]
+
+        def _augmented_get_media_reader_profile(media_domain: str, site_type: str = "") -> dict:
+            profile = _original_get_media_reader_profile(media_domain, site_type) or {}
+            # Defensive : ensure all keys the prompt template reads exist.
+            for k in ("description", "expertise", "pain_points", "tone",
+                      "editorial_voice", "style_examples"):
+                profile.setdefault(k, "")
+
+            client_voice = getattr(gen, "_ux_client_voice", "") or ""
+            client_audience = getattr(gen, "_ux_client_audience", "") or ""
+            persona_name = getattr(gen, "_ux_persona_name", "") or ""
+
+            # Persona prefix — survives line 5474 overwrite because we put it
+            # INSIDE description (the field the prompt actually reads).
+            if persona_name:
+                profile["description"] = (
+                    f"Lecteur cible primaire : {persona_name}. "
+                    f"Profil média : {profile['description']}"
+                ).strip()
+
+            # Client brand audience overlay — the article speaks to BOTH the
+            # media reader AND the client's brand audience. Both audiences must
+            # be addressed for the article to convert.
+            if client_audience:
+                profile["description"] = (
+                    f"{profile['description']}\n\n"
+                    f"Audience secondaire (audience marque cliente) : {client_audience}"
+                ).strip()
+
+            # Client brand voice overlay — added at the END of tone +
+            # editorial_voice so it nuances (without erasing) the media tone.
+            if client_voice:
+                voice_suffix = (
+                    f" Voix de marque cliente à respecter en parallèle : {client_voice}."
+                )
+                profile["tone"] = (profile["tone"] + voice_suffix).strip()
+                profile["editorial_voice"] = (
+                    profile["editorial_voice"] + voice_suffix
+                ).strip()
+
+            return profile
+
+        gcg._get_media_reader_profile = _augmented_get_media_reader_profile
+
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -400,6 +464,9 @@ def _make_workspace_aware_class():
             competitor_domains: set[str] | None = None,
             excluded_brand_names: list[str] | None = None,
             client_industry: str = "",
+            client_voice: str = "",
+            client_audience: str = "",
+            persona_name: str = "",
             writing_provider: str = "claude",
             phase_callback=None,
             **kwargs,
@@ -456,6 +523,12 @@ def _make_workspace_aware_class():
             self._ux_competitor_domains = set(competitor_domains or set())
             self._ux_excluded_brand_names = list(excluded_brand_names or [])
             self._ux_client_industry = client_industry or ""
+            # C.2.3 + C.2.4 — read by the _get_media_reader_profile shadow
+            # in _PatchedModuleFns to blend client brand context on top of the
+            # scraped media tone profile.
+            self._ux_client_voice = client_voice or ""
+            self._ux_client_audience = client_audience or ""
+            self._ux_persona_name = persona_name or ""
             self._phase_callback = phase_callback or (lambda *a, **kw: None)
 
         def _fire_phase(self, key: str) -> None:
@@ -482,6 +555,10 @@ def _make_workspace_aware_class():
             them on exit). All other phase callbacks fire from the inline
             method overrides below (called by super's own internal loop).
             """
+            # C.2.2bis — stash site_type from the opportunity so _analyze_serp
+            # can clamp target_word_count to the media host's natural length
+            # (lifestyle blog ≠ doctissimo long-form).
+            self._ux_opportunity_site_type = (opportunity or {}).get("site_type", "")
             self._fire_phase("preparing")
             with _PatchedModuleFns(self):
                 return super().generate_for_opportunity(
@@ -490,6 +567,41 @@ def _make_workspace_aware_class():
                     faq_file=faq_file,
                     generate_image=generate_image,
                 )
+
+        # C.2.2bis — site_type-aware max word count cap.
+        # Pure SERP median can overshoot what fits the media host (parisselectbook
+        # = 500-800 words lifestyle blog ; doctissimo-driven SERP median = 2500).
+        # We clamp the target so the article stays in the host's natural range.
+        _SITE_TYPE_MAX_WORDS = {
+            "Health & Beauty Media": 2500,
+            "Blog":                  1200,
+            "News":                  800,
+            "Forum":                 600,
+            "Encyclopedia":          4000,
+            "Government":            4000,
+            "Medical Reference":     4000,
+            "Brand":                 2500,
+            "E-commerce":            1500,
+            "Other":                 2000,
+        }
+
+        def _analyze_serp(self, question: str, guide_id=None) -> dict:
+            """Override : clamp target_word_count to a site-type ceiling so
+            the article respects the host media's natural length envelope.
+            Other SERP signals (target_soseo, target_dseo, competitors data)
+            are preserved unchanged."""
+            result = super()._analyze_serp(question, guide_id=guide_id)
+            site_type = getattr(self, "_ux_opportunity_site_type", "") or ""
+            cap = self._SITE_TYPE_MAX_WORDS.get(site_type)
+            if cap and isinstance(result, dict):
+                raw_target = int(result.get("target_word_count") or 0)
+                if raw_target > cap:
+                    logger.info(
+                        f"target_word_count clamp : {raw_target} → {cap} "
+                        f"(site_type={site_type!r}, SERP median exceeds host envelope)"
+                    )
+                    result["target_word_count"] = cap
+            return result
 
         def _fetch_brand_content(self, brand_site: str, topic: str,
                                   question: str) -> str:
@@ -755,7 +867,7 @@ def _update_progress(item, db: Session, phase: str, phase_num: int,
         "phase_num":   phase_num,
         "phase_total": _PHASE_TOTAL,
         "phase_label": phase_label,
-        "updated_at":  datetime.utcnow().isoformat(),
+        "updated_at":  datetime.utcnow().isoformat() + "Z",
     })
     meta["in_progress"] = in_progress
     item.content_metadata = meta
@@ -846,7 +958,7 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
     item.status = "generating"
     meta_init = dict(item.content_metadata or {})
     meta_init["in_progress"] = {
-        "started_at":              datetime.utcnow().isoformat(),
+        "started_at":              datetime.utcnow().isoformat() + "Z",
         "estimated_total_seconds": _ESTIMATED_TOTAL_SECONDS,
         "phase":                   "preparing",
         "phase_num":               1,
@@ -869,9 +981,17 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
 
     workspace_brief_text = format_workspace_brief(client.apps if client else None)
     client_industry = ""
+    client_voice = ""
+    client_audience = ""
     if client and client.apps:
         client_brief = client.apps.get("client_brief") or {}
         client_industry = (client_brief.get("industry") or "").strip()
+        # C.2.3 — voice + audience were extracted by brief_generator into the
+        # client_brief JSONB but never read on this side. Used downstream to
+        # augment the media-tone profile so the article inherits the brand's
+        # editorial voice on top of the media host's tone.
+        client_voice = (client_brief.get("voice") or "").strip()
+        client_audience = (client_brief.get("audience") or "").strip()
 
     promoted_brand_ids: list = []
     promoted_brand_names: list[str] = []
@@ -1031,14 +1151,23 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
             f"(used for YTG + SERP). Full conversational question preserved "
             f"in item.target_question for FAQ UI + scan_llm_tests."
         )
-        opportunity = _build_synthetic_opportunity(item, ytg_query=primary_fanout)
+        # C.2.1 — resolve site_type from the target media domain so seo-llm
+        # picks the right fallback tone (Health Media vs Blog vs News).
+        resolved_site_type = _resolve_site_type_for_target(item.target_url, db)
+        logger.info(
+            f"site_type for target {item.target_url}: '{resolved_site_type or '(generic)'}'"
+        )
+        opportunity = _build_synthetic_opportunity(
+            item, ytg_query=primary_fanout, site_type=resolved_site_type,
+        )
     else:
         logger.warning(
             f"fan_out_extractor returned empty for item {item_id} "
             f"(no scan_llm_results captured yet ?) — falling back to question_text "
             f"with YTG safety-net truncate."
         )
-        opportunity = _build_synthetic_opportunity(item)
+        resolved_site_type = _resolve_site_type_for_target(item.target_url, db)
+        opportunity = _build_synthetic_opportunity(item, site_type=resolved_site_type)
 
     logger.info(
         f"Generating article for content_item {item_id} "
@@ -1075,6 +1204,9 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
             competitor_domains=competitor_domains,
             excluded_brand_names=excluded_brand_names,
             client_industry=client_industry,
+            client_voice=client_voice,
+            client_audience=client_audience,
+            persona_name=(item.persona_name or "").strip(),
             writing_provider=writing_provider,
             phase_callback=lambda key, num, label: _update_progress(
                 item, db, key, num, label,
@@ -1118,10 +1250,22 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
     validation_score = float(result.get("validation_score") or 0.0)
     ytg_soseo = float(result.get("ytg_soseo") or 0.0)
     ytg_dseo = float(result.get("ytg_dseo") or 0.0)
+    # C.1.8 — per-guide YTG targets (median SOSEO/DSEO of top SERP competitors
+    # for THIS query). seo-llm computes them at geo_content_generator.py:5424.
+    # 0.0 = SERP analysis was unavailable → UI falls back to the hardcoded
+    # YTG_SOSEO_MIN=80 / YTG_DSEO_MIN=30 / MAX=70 as displayed defaults.
+    target_soseo = float(result.get("target_soseo") or 0.0)
+    target_dseo = float(result.get("target_dseo") or 0.0)
     target_word_count = int(result.get("target_word_count") or 0)
     fanout_coverage = int(result.get("fanout_coverage") or 0)
     serp_competitors = int(result.get("serp_competitors") or 0)
     guide_id = int(result.get("guide_id") or 0)
+
+    # C.1.7 — post-processing sanitizers (strips placeholder [brackets],
+    # dedupes the inline Sources <aside>, relinkifies "Voir les avis" cells
+    # the LLM stripped from prebuilt review tables). Best-effort : never
+    # raises. See `_postprocess_article_html` docstring for rationale.
+    html_content = _postprocess_article_html(html_content)
 
     item.content_html = html_content or None
     item.content_text = _html_to_text(html_content) if html_content else None
@@ -1136,7 +1280,15 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
     if outline:
         item.article_outline = json.dumps(outline, ensure_ascii=False)
 
-    sources_used = _extract_sources_from_html(html_content)
+    # C.1.8 — classify each cited source by type (brand/scientific/review/
+    # editorial/institutional/competitor) so the UI breakdown line under
+    # "16 distinct sources" is meaningful instead of "reference 16".
+    sources_used = _extract_sources_from_html(
+        html_content,
+        brand_domains=set(promoted_brand_domains or []),
+        competitor_domains=set(competitor_domains or set()),
+        trust_domains=set(trust_domains or []),
+    )
 
     # quality_score = 0-100 (UI chip expects 0-100, scales of FAQ generator)
     item.content_metadata = {
@@ -1145,6 +1297,10 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
         "validation_score":    validation_score,
         "ytg_soseo":           ytg_soseo,
         "ytg_dseo":            ytg_dseo,
+        # C.1.8 — competitor-derived targets (median of top SERP results for
+        # this guide). When 0.0 the UI shows the hardcoded fallback band.
+        "target_soseo":        target_soseo,
+        "target_dseo":         target_dseo,
         "target_word_count":   target_word_count,
         "fanout_coverage":     fanout_coverage,
         "fanout_covered":      list(result.get("fanout_covered") or []),
@@ -1153,8 +1309,8 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
         "sources_used":        sources_used,
         "sources_count":       len(sources_used),
         "duration_ms":         duration_ms,
-        "generated_at":        datetime.utcnow().isoformat(),
-        "generator_version":   "geo-section-mode-v2-fanout",  # bumped for C.1.5
+        "generated_at":        datetime.utcnow().isoformat() + "Z",
+        "generator_version":   "geo-section-mode-v3-sanitized",  # bumped for C.1.7
         "writing_provider":    writing_provider,
         "guide_id":            guide_id,
         # Phase C.1.5 — fan-outs actually used (primary at [0] = sent to YTG,
@@ -1207,7 +1363,11 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
 
 # ─── Synthetic-opportunity + HTML extraction helpers ───────────────────
 
-def _build_synthetic_opportunity(item, ytg_query: str | None = None) -> dict:
+def _build_synthetic_opportunity(
+    item,
+    ytg_query: str | None = None,
+    site_type: str = "",
+) -> dict:
     """Construct the opportunity dict expected by GEOContentGenerator.
 
     The `source_name` is synthetic — `_extract_brand_from_source` is
@@ -1218,6 +1378,12 @@ def _build_synthetic_opportunity(item, ytg_query: str | None = None) -> dict:
     consumption. The full conversational question stays preserved on
     item.target_question for the UI / FAQ Schema.org / future use cases.
     Fallback to item.target_question when not provided (legacy/empty path).
+
+    `site_type` (Phase C.2.1) : Health Media / Blog / News / Brand /
+    Encyclopedia / etc. seo-llm uses it for fallback tone selection
+    (geo_content_generator.py:928 — `fallback_by_site_type`). Caller
+    resolves it via the shared domain_classifier (DB cache → Gemini).
+    Pass "" to keep the legacy generic-tone behavior.
     """
     question_text = (ytg_query or item.target_question or item.topic_name or "").strip()
     return {
@@ -1226,8 +1392,38 @@ def _build_synthetic_opportunity(item, ytg_query: str | None = None) -> dict:
         "question_id":   str(item.id),
         "question_text": question_text,
         "persona_name":  (item.persona_name or "").strip(),
-        "site_type":     "",
+        "site_type":     site_type or "",
     }
+
+
+def _resolve_site_type_for_target(target_url: str | None, db: Session) -> str:
+    """C.2.1 — Classify the article's target media domain into a site_type
+    (Health Media / Blog / News / Brand / E-commerce / …) using the shared
+    domain_classifier service.
+
+    DB cache is hit-rate ~100% for PF (3 376 classifications imported in
+    C.1.4), instant for warm domains. Gemini fallback for cold domains
+    costs ~$0.0005 / new domain (cached forever after).
+
+    Returns "" when classification fails — caller treats as "no signal,
+    use generic tone".
+    """
+    if not target_url:
+        return ""
+    domain = _extract_url_domain(target_url)
+    if not domain:
+        return ""
+    try:
+        from services.domain_classifier import classify_domains
+        result = classify_domains([domain], db)
+        return result.get(domain, "") or ""
+    except Exception:
+        logger.exception(
+            "_resolve_site_type_for_target: classification failed for %s — "
+            "falling back to generic tone",
+            domain,
+        )
+        return ""
 
 
 def _resolve_scan_question_id(item, db: Session) -> str | None:
@@ -1262,6 +1458,144 @@ def _extract_url_domain(url: str | None) -> str:
         return _normalize_domain(host)
     except Exception:
         return _normalize_domain(url)
+
+
+def _postprocess_article_html(html: str) -> str:
+    """C.1.7 — three surgical sanitizers applied to the seo-llm output before
+    persistence. All three address the same root foot-gun documented at
+    seo_llm/src/geo_content_generator.py:6034 — the 60K-char system prompt
+    makes the LLM forget instructions, so the brittle parts (placeholder
+    syntax leak, prebuilt Sources aside duplication, prebuilt review-table
+    link stripping) leak into the rendered article.
+
+    Patching in our wrapper keeps the submodule untouched (no fork debt).
+
+    Order matters :
+      1. Relinkify "Voir les avis" rows FIRST — needs URL map from `<a href>`s
+         still in the body, including the about-to-be-stripped Sources aside.
+      2. Strip duplicate Sources aside SECOND — the canonical UI panel below
+         the content renders the same data from `content_metadata.sources_used`.
+      3. Strip placeholder brackets LAST — purely cosmetic regex over text.
+
+    Defensive : any step that raises is logged + skipped, returning the
+    partially-cleaned HTML rather than the raw input (best-effort).
+    """
+    if not html:
+        return html
+    import re
+
+    try:
+        from bs4 import BeautifulSoup, NavigableString
+        soup = BeautifulSoup(html, "html.parser")
+
+        # ── Step 1 — relinkify "Voir les avis" cells in reviews tables ──
+        # The seo-llm prebuilt table (geo_content_generator.py:6055-6058) ships
+        # `<a href="{url}">Voir les avis</a>` but the LLM frequently drops the
+        # anchor when rewriting the section. We rebuild it by matching the
+        # row's platform-name `<td>` against the domain map collected from
+        # every other `<a href>` in the document.
+        href_by_domain: dict[str, str] = {}
+        for a in soup.find_all("a", href=True):
+            href = (a.get("href") or "").strip()
+            if not href or href.startswith("#"):
+                continue
+            try:
+                host = (urlparse(href).netloc or "").lower()
+            except Exception:
+                continue
+            host = host[4:] if host.startswith("www.") else host
+            if host and host not in href_by_domain:
+                href_by_domain[host] = href
+
+        review_link_text_rx = re.compile(
+            r"\b(voir|lire|consulter)\s+(les?\s+)?(avis|reviews?|t[ée]moignages?)\b",
+            re.IGNORECASE,
+        )
+        domain_in_text_rx = re.compile(
+            r"\b([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b", re.IGNORECASE
+        )
+        for row in soup.find_all("tr"):
+            cells = row.find_all("td")
+            if len(cells) < 2:
+                continue
+            last_cell = cells[-1]
+            if last_cell.find("a"):
+                continue  # already linkified
+            text = last_cell.get_text(strip=True)
+            if not text or not review_link_text_rx.search(text):
+                continue
+            # Try to match the platform from any earlier cell's text
+            target_url: str | None = None
+            for c in cells[:-1]:
+                cell_text = c.get_text(" ", strip=True).lower()
+                if not cell_text:
+                    continue
+                # Direct domain mention (e.g. "sephora.fr")
+                for m in domain_in_text_rx.finditer(cell_text):
+                    cand = m.group(1).lower()
+                    cand = cand[4:] if cand.startswith("www.") else cand
+                    if cand in href_by_domain:
+                        target_url = href_by_domain[cand]
+                        break
+                if target_url:
+                    break
+                # Brand-name → domain heuristic (sephora → sephora.fr, etc.)
+                first_token = cell_text.split()[0] if cell_text.split() else ""
+                if first_token and len(first_token) >= 4:
+                    for dom, url in href_by_domain.items():
+                        if first_token in dom:
+                            target_url = url
+                            break
+                if target_url:
+                    break
+            if target_url:
+                new_a = soup.new_tag("a", href=target_url)
+                new_a["target"] = "_blank"
+                new_a["rel"] = "noopener"
+                new_a.string = text
+                last_cell.clear()
+                last_cell.append(new_a)
+
+        # ── Step 2 — strip the duplicate <aside class="sources"> block ──
+        # _inject_sources_section (geo_content_generator.py:10764-10830)
+        # emits this unconditionally. The validation page already renders
+        # the canonical Sources panel from content_metadata.sources_used.
+        for aside in soup.find_all("aside", class_="sources"):
+            aside.decompose()
+        # Same for any <section class="sources"> variant (defensive).
+        for sec in soup.find_all("section", class_="sources"):
+            sec.decompose()
+        # Some prompt revisions emit a plain `<h2>Sources</h2><ul>…</ul>`
+        # without a wrapping aside — match by H2 text + adjacent UL/OL.
+        for h2 in list(soup.find_all(["h2", "h3"])):
+            heading_text = (h2.get_text(strip=True) or "").lower()
+            if heading_text not in {"sources", "sources :", "références", "references"}:
+                continue
+            sibling = h2.find_next_sibling()
+            if sibling and sibling.name in {"ul", "ol"}:
+                sibling.decompose()
+            h2.decompose()
+
+        html = str(soup)
+    except Exception:
+        logger.exception("_postprocess_article_html: BeautifulSoup pass failed")
+
+    # ── Step 3 — strip [lowercase_word] placeholder leaks ──
+    # The 60K system prompt teaches the LLM `[plateforme]` `[author]` syntax
+    # as a "fill-me-in" pattern, and it sometimes mimics this when uncertain
+    # about a word inside a verbatim quote. Restrictive regex : lowercase
+    # single-word (with French accents), no digits, no uppercase — so we
+    # don't touch `[MARQUE]`, `[1]` footnote markers, or `[Note 2]`.
+    try:
+        html = re.sub(
+            r"\[([a-zàâäçéèêëîïôöùûüÿ]{2,})\]",
+            r"\1",
+            html,
+        )
+    except Exception:
+        logger.exception("_postprocess_article_html: bracket-strip regex failed")
+
+    return html
 
 
 def _html_to_text(html: str) -> str:
@@ -1304,10 +1638,85 @@ def _extract_outline_from_html(html: str) -> list[dict]:
         return []
 
 
-def _extract_sources_from_html(html: str) -> list[dict]:
+# C.1.8 — source-type classification heuristics. Drives the breakdown line
+# under "16 distinct sources" in the validation page KPI card so the user
+# sees source quality at a glance (brand vs scientific vs review vs editorial).
+# All sets are matched as substrings against the *normalized* hostname.
+_SCIENTIFIC_DOMAIN_HINTS = {
+    "pubmed", "ncbi.nlm.nih.gov", "pmc.ncbi", "cochrane", "who.int",
+    "has-sante.fr", "ansm.sante.fr", "ema.europa.eu", "nih.gov",
+    "sciencedirect", "springer", "wiley", "nature.com", "cell.com",
+    "thelancet", "nejm.org", "bmj.com", "jama", "biomedcentral",
+}
+_REVIEW_DOMAIN_HINTS = {
+    "sephora.", "amazon.", "trustpilot", "beaute-test", "avis-verifies",
+    "trustedshops", "feefo", "google.com/maps", "tripadvisor",
+    "doctissimo.fr/forum", "auféminin.com/forum", "aufeminin.com/forum",
+    "marmiton", "marieclaire.fr/avis",
+}
+_INSTITUTIONAL_DOMAIN_HINTS = {
+    ".gouv.fr", ".gov", "europa.eu", "vidal.fr", "ameli.fr",
+    "santepubliquefrance", "inserm.fr", "lecrat.fr",
+}
+
+def _classify_source_type(
+    netloc: str,
+    *,
+    brand_domains: set[str] | None = None,
+    competitor_domains: set[str] | None = None,
+    trust_domains: set[str] | None = None,
+) -> str:
+    """Tag a hostname with one of: brand · competitor · scientific · review ·
+    institutional · editorial. Subdomain-aware. Falls back to 'editorial' for
+    media-like hosts that don't match any heuristic — the most common case for
+    third-party press citations."""
+    host = (netloc or "").lower().lstrip(".")
+    if not host:
+        return "editorial"
+    brand_domains = {d.lower().lstrip(".") for d in (brand_domains or set())}
+    competitor_domains = {d.lower().lstrip(".") for d in (competitor_domains or set())}
+    trust_domains = {d.lower().lstrip(".") for d in (trust_domains or set())}
+
+    def _match(host: str, candidates: set[str]) -> bool:
+        # exact or subdomain match (e.g. host="m.sephora.fr", cand="sephora.fr")
+        for c in candidates:
+            if host == c or host.endswith("." + c):
+                return True
+        return False
+
+    if _match(host, brand_domains):
+        return "brand"
+    if _match(host, competitor_domains):
+        return "competitor"
+    if any(hint in host for hint in _SCIENTIFIC_DOMAIN_HINTS):
+        return "scientific"
+    if any(hint in host for hint in _REVIEW_DOMAIN_HINTS):
+        return "review"
+    if any(hint in host for hint in _INSTITUTIONAL_DOMAIN_HINTS):
+        return "institutional"
+    if _match(host, trust_domains):
+        # Trust-listed but doesn't match scientific/institutional patterns →
+        # treat as editorial (the trust list contains both expert media and
+        # institutional sources).
+        return "editorial"
+    return "editorial"
+
+
+def _extract_sources_from_html(
+    html: str,
+    *,
+    brand_domains: set[str] | None = None,
+    competitor_domains: set[str] | None = None,
+    trust_domains: set[str] | None = None,
+) -> list[dict]:
     """Extract <a href> URLs from the generated article, deduplicated. Each
     entry carries `url`, `domain`, `anchor`, `org`, `type` — the shape the
-    validation page UI expects (mirrors FAQ generator's `sources_used`)."""
+    validation page UI expects (mirrors FAQ generator's `sources_used`).
+
+    `type` is classified by `_classify_source_type` against the per-call
+    brand / competitor / trust domain sets. When all three sets are empty
+    (legacy call sites) everything falls back to 'editorial', which still
+    renders cleanly in the UI breakdown line."""
     if not html:
         return []
     try:
@@ -1331,7 +1740,12 @@ def _extract_sources_from_html(html: str) -> list[dict]:
                 "domain": netloc,
                 "anchor": anchor,
                 "org":    netloc,  # cosmetic — TODO C.2 enrich via trust_sources.details
-                "type":   "reference",
+                "type":   _classify_source_type(
+                    netloc,
+                    brand_domains=brand_domains,
+                    competitor_domains=competitor_domains,
+                    trust_domains=trust_domains,
+                ),
             })
         return sources
     except Exception:

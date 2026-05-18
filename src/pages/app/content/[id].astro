@@ -190,7 +190,14 @@ function fmtDate(iso: string | null): string {
                 <template x-if="generating">
                   <span class="inline-flex flex-col gap-0.5 min-w-[180px]">
                     <span class="text-[10px] tabular-nums text-charcoal-light flex items-center justify-between gap-2">
-                      <span x-text="(progressPhaseLabel() ? progressPhaseLabel() + ' · ' : '') + generateElapsedSec + 's'"></span>
+                      {/* C.1.12 — Phase label is hoverable, exposes the full
+                          5-phase pipeline explanation for curious users.
+                          Article-only — FAQ gen has only one phase. */}
+                      <span class="inline-flex items-center gap-1">
+                        <span :class="item.content_type === 'netlinking_article' && progressPhaseLabel() ? 'cursor-help' : ''"
+                              :title="item.content_type === 'netlinking_article' ? progressPhasesTooltip() : ''"
+                              x-text="(progressPhaseLabel() ? progressPhaseLabel() + ' · ' : '') + generateElapsedSec + 's'"></span>
+                      </span>
                       <span class="text-charcoal-light/70" x-text="'~' + generateExpectedSec + 's'"></span>
                     </span>
                     <span class="block h-1 w-full bg-gray-100 rounded-full overflow-hidden">
@@ -359,7 +366,11 @@ function fmtDate(iso: string | null): string {
                     <svg class="w-3.5 h-3.5 text-purple-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/>
                     </svg>
-                    <strong class="text-charcoal-dark">3 media partners that already cite this topic</strong>
+                    <strong class="text-charcoal-dark">
+                      <span x-text="(item.target_url_candidates || []).length"></span>
+                      media partner<span x-show="(item.target_url_candidates || []).length > 1">s</span>
+                      that already cite this topic
+                    </strong>
                     <span class="cursor-help select-none ml-0.5"
                           title="Discovered from your scan : these are the third-party medias the LLMs ALREADY cite when answering this question. Publish a sponsored article there to recapture citation share.&#10;&#10;HOW IT'S COMPUTED&#10;• Citation count — total mentions across all LLM providers in the scan&#10;• DA (Domain Authority) — Majestic / Ahrefs-style authority score from LinkFinder (0-100, higher = stronger backlink profile)&#10;• Price € HT — published price for a sponsored placement on link-finder.net&#10;• Ranking : citation_count × log(DA+1) − price/1000&#10;&#10;Sources : citations table in scan_llm_results + LinkFinder catalog. Click 'Refresh prices' to re-query LinkFinder.">ⓘ</span>
                     <button @click="refreshMediaEnrichment()"
@@ -415,9 +426,29 @@ function fmtDate(iso: string | null): string {
                                 DA <span x-text="c.da"></span>
                               </span>
                             </template>
-                            <template x-if="c.price_eur != null">
+                            {/* C.1.14 — when LinkFinder enriched a platform_url
+                                for this domain, the price chip becomes a direct
+                                link to the order page on link-finder.net.
+                                Fitts's Law : the price is what the user wants
+                                to act on — make it the click target. Fallback
+                                stays as plain span when no platform_url. */}
+                            {/* C.1.14 — when the LinkFinder catalog has an order URL
+                                for this domain (Develink / similar marketplace),
+                                the price chip becomes a direct link to the order
+                                page. Fitts's Law : the price is what the user
+                                wants to act on — make it the click target. */}
+                            <template x-if="c.price_eur != null && c.platform_url">
+                              <a :href="c.platform_url"
+                                 target="_blank" rel="noopener nofollow"
+                                 class="text-amber-700 font-medium hover:text-amber-900 hover:underline inline-flex items-center gap-0.5"
+                                 :title="'Order this sponsored placement on the partner marketplace — €' + Math.round(c.price_eur).toLocaleString('fr-FR') + ' HT. Opens in a new tab.'">
+                                💰 €<span x-text="Math.round(c.price_eur).toLocaleString('fr-FR')"></span>
+                                <span class="text-[9px] opacity-70">↗</span>
+                              </a>
+                            </template>
+                            <template x-if="c.price_eur != null && !c.platform_url">
                               <span class="text-amber-700 font-medium"
-                                    :title="'Sponsored placement price HT (LinkFinder catalog). Click Refresh prices to re-query.'">
+                                    :title="'Sponsored placement price HT (catalog data). No direct order URL on this entry — search the media name on link-finder.net.'">
                                 💰 €<span x-text="Math.round(c.price_eur).toLocaleString('fr-FR')"></span>
                               </span>
                             </template>
@@ -866,7 +897,9 @@ function fmtDate(iso: string | null): string {
                     the user is not actively editing — external state changes
                     (loading, save returning fresh server data) still refresh
                     the DOM, user typing doesn't. */}
-                <div x-show="editorMode === 'visual'" class="prose prose-sm max-w-none faq-rendered border border-gray-100 rounded-lg p-4 min-h-[300px] focus:outline-none focus:border-coral hover:border-gray-300 transition-colors cursor-text"
+                <div x-show="editorMode === 'visual'"
+                     class="prose prose-sm max-w-none border border-gray-100 rounded-lg p-4 min-h-[300px] focus:outline-none focus:border-coral hover:border-gray-300 transition-colors cursor-text"
+                     :class="item.content_type === 'netlinking_article' ? 'article-rendered' : 'faq-rendered'"
                      contenteditable="true"
                      x-ref="visualEditor"
                      x-init="$el.innerHTML = renderedContentHtml()"
@@ -1121,6 +1154,274 @@ function fmtDate(iso: string | null): string {
           </template>
         </section>
 
+        {/* C.1.8 — Generation Quality KPI card (plain-language redesign).
+            Law of UX activated :
+              • Jakob's Law — every metric translated into user-vocabulary,
+                no SOSEO / DSEO / RAPP / fan-out / grammes in the primary
+                view. Acronyms surface only in hover for the SEO-savvy.
+              • Doherty Threshold — Approve/Reject decision facts live in
+                the visible card, not behind a tooltip.
+              • Postel's Law — even a non-SEO user understands "Strong /
+                Slightly thin / All answered" without a glossary.
+              • Von Restorff — green/amber/red on each status badge so the
+                weakest signal is the one the eye lands on.
+              • Law of Proximity — 3 grouped sections (Overall / SEO /
+                AI Search / Content) match the user's mental model :
+                "is it good ? · will it rank ? · will AI cite it ?".
+              • Tesler's Law — competitor-derived targets (target_soseo,
+                target_dseo) are surfaced so the user sees WHY 110 is good
+                here ("median competitor scored 95"). The hardcoded 80/30-70
+                fallback is shown explicitly when SERP data is unavailable. */}
+        <template x-if="item.content_metadata && item.content_metadata.quality_score != null">
+          <section class="bg-white rounded-xl border border-gray-200 p-5">
+
+            {/* ── Header — verdict + overall score ──────────────── */}
+            <div class="flex items-center justify-between mb-1">
+              <h2 class="text-sm font-semibold text-charcoal-dark">Generation quality</h2>
+              <span class="text-[10px] uppercase tracking-wide font-semibold px-2 py-0.5 rounded"
+                    :class="{
+                      'bg-emerald-100 text-emerald-800': item.content_metadata.validation_verdict === 'APPROVED',
+                      'bg-amber-100 text-amber-800':    item.content_metadata.validation_verdict === 'NEEDS_REVISION',
+                      'bg-red-100 text-red-800':        ['ERROR','REJECTED'].includes(item.content_metadata.validation_verdict),
+                    }"
+                    :title="qualityVerdictTooltip()"
+                    x-text="qualityVerdictLabel()"></span>
+            </div>
+            <div class="flex items-baseline gap-2">
+              <span class="text-3xl font-bold tabular-nums"
+                    :class="item.content_metadata.quality_score >= 80 ? 'text-emerald-600'
+                          : item.content_metadata.quality_score >= 60 ? 'text-amber-600'
+                          : 'text-red-600'"
+                    x-text="item.content_metadata.quality_score"></span>
+              <span class="text-xs text-charcoal-light">/ 100 overall quality</span>
+              <span class="cursor-help select-none text-charcoal-light text-[10px] ml-1"
+                    title="SEO/editorial jargon : also called a RAPP validator (Relevance · Accuracy · Persona · Promotion). 7 criteria scored: clarity, factual accuracy, source quality, brand-bias compliance, freshness, tone consistency, fan-out coverage. Underlying score is on /10, displayed here × 10 → /100.">ⓘ</span>
+            </div>
+            <p class="text-[11px] text-charcoal-light mt-0.5"
+               x-text="editorialValidatorLine()"></p>
+
+            {/* ── SEO scoring (vs SERP competitors) ─────────────── */}
+            {/* C.1.10 — section-header ⓘ removed : the per-metric ⓘ on
+                "Keyword coverage" and "Topic diversity" already explain
+                YTG / SOSEO / DSEO. The section header was repeating the
+                same context 3× (against Jakob's Law of consistency). */}
+            <div class="mt-4 pt-3 border-t border-gray-100">
+              <p class="text-[10px] uppercase tracking-wide font-semibold text-charcoal-light mb-2">SEO scoring</p>
+
+              {/* Keyword coverage (SOSEO) — versus competitor median target */}
+              <template x-if="item.content_metadata.ytg_soseo != null">
+                <div class="mb-3">
+                  <div class="flex items-center justify-between text-[12px] mb-0.5">
+                    <span class="text-charcoal-dark font-medium inline-flex items-center gap-1">
+                      Keyword coverage
+                      <span class="cursor-help select-none text-charcoal-light text-[10px]"
+                            title="SEO jargon : SOSEO (Sémantique Optimization SEO) — YourTextGuru's score (0-130) measuring how many of the topic 'grammes' (semantic keyword stems extracted from top SERP competitors) appear in your article.&#10;&#10;Target = the median SOSEO of the top 10 Google SERP results for this exact query (dynamic per topic). Falls back to 80 when SERP analysis is unavailable.&#10;&#10;Higher = stronger semantic alignment with what currently ranks on Google.">ⓘ</span>
+                    </span>
+                    <span class="tabular-nums font-semibold"
+                          :class="soseoStatusClass()">
+                      <span x-text="soseoStatusLabel()"></span>
+                      <span class="text-charcoal-light text-[11px] ml-1" x-text="item.content_metadata.ytg_soseo.toFixed(0)"></span>
+                    </span>
+                  </div>
+                  <div class="h-1.5 bg-gray-100 rounded overflow-hidden relative">
+                    {/* Target marker — vertical line at the competitor median */}
+                    <div class="absolute top-0 bottom-0 w-px bg-charcoal-light/40 z-20"
+                         :style="`left: ${Math.min(99, (soseoTarget() / 130) * 100)}%`"
+                         :title="'Target: ' + soseoTarget()"></div>
+                    <div class="h-full rounded transition-all"
+                         :class="soseoBarClass()"
+                         :style="`width: ${Math.min(100, (item.content_metadata.ytg_soseo / 130) * 100)}%`"></div>
+                  </div>
+                  <p class="text-[10px] text-charcoal-light mt-1" x-text="soseoTargetLine()"></p>
+                </div>
+              </template>
+
+              {/* Topic diversity (DSEO) — sweet-spot band 30-70 */}
+              <template x-if="item.content_metadata.ytg_dseo != null">
+                <div class="mb-1">
+                  <div class="flex items-center justify-between text-[12px] mb-0.5">
+                    <span class="text-charcoal-dark font-medium inline-flex items-center gap-1">
+                      Topic diversity
+                      <span class="cursor-help select-none text-charcoal-light text-[10px]"
+                            title="SEO jargon : DSEO (Diversity SEO) — YourTextGuru's lexical-spread score (0-100).&#10;&#10;• Below 30 — vocabulary too narrow, thin content → ranking risk on adjacent queries&#10;• 30-70 — sweet spot, natural language&#10;• Above 70 — keyword stuffing or off-topic drift&#10;• Above 85 — flagged as AI-detection risk&#10;&#10;The generator automatically rewrites overly dense passages above 70 to humanise the text before saving.">ⓘ</span>
+                    </span>
+                    <span class="tabular-nums font-semibold"
+                          :class="dseoStatusClass()">
+                      <span x-text="dseoStatusLabel()"></span>
+                      <span class="text-charcoal-light text-[11px] ml-1" x-text="item.content_metadata.ytg_dseo.toFixed(0)"></span>
+                    </span>
+                  </div>
+                  <div class="h-1.5 bg-gray-100 rounded overflow-hidden relative">
+                    <div class="absolute top-0 h-full bg-emerald-50"
+                         style="left: 30%; width: 40%;"></div>
+                    <div class="h-full rounded transition-all relative z-10"
+                         :class="dseoBarClass()"
+                         :style="`width: ${Math.min(100, item.content_metadata.ytg_dseo)}%`"></div>
+                  </div>
+                  <p class="text-[10px] text-charcoal-light mt-1" x-text="dseoTargetLine()"></p>
+                </div>
+              </template>
+            </div>
+
+            {/* ── AI search readiness ──────────────────────────── */}
+            {/* C.1.10 — section-header ⓘ removed : "Question coverage" ⓘ
+                below already explains fan-outs. No need to duplicate. */}
+            <div class="mt-4 pt-3 border-t border-gray-100">
+              <p class="text-[10px] uppercase tracking-wide font-semibold text-charcoal-light mb-2">AI search readiness</p>
+              <div class="flex items-center justify-between text-[12px]">
+                <span class="text-charcoal-dark font-medium inline-flex items-center gap-1">
+                  Question coverage
+                  <span class="cursor-help select-none text-charcoal-light text-[10px]"
+                        title="Also called fan-out coverage. Measures how many of the AI-reformulated sub-queries the article actually addresses.&#10;&#10;Baseline = whatever the LLMs ASKED during YOUR scan (variable per topic). 5/5 doesn't mean comprehensive topic coverage — it means the article covers everything Google SGE / ChatGPT / Claude currently reformulate the user's question into.">ⓘ</span>
+                </span>
+                <span class="tabular-nums font-semibold"
+                      :class="fanoutCoverageOk() ? 'text-emerald-700' : 'text-amber-700'">
+                  <span x-text="fanoutCoverageStatusLabel()"></span>
+                  <span class="text-charcoal-light text-[11px] ml-1" x-text="fanoutCoverageLabel()"></span>
+                </span>
+              </div>
+              <p class="text-[10px] text-charcoal-light mt-1" x-text="fanoutCoverageDetail()"></p>
+
+              {/* Expandable fan-out list */}
+              {/* C.1.10 — symmetric See/Hide verbs ; ★ Primary badge pinned
+                  to row #1 (was orphan footer text). */}
+              <template x-if="(item.content_metadata.fan_outs_used || []).length > 0">
+                <div class="mt-2">
+                  <button type="button"
+                          @click="expandFanouts = !expandFanouts"
+                          class="text-[10px] text-purple-700 hover:text-purple-900 inline-flex items-center gap-1">
+                    <svg class="w-3 h-3 transition-transform"
+                         :class="expandFanouts ? 'rotate-90' : ''"
+                         fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+                    </svg>
+                    <span x-text="expandFanouts
+                          ? 'Hide questions'
+                          : 'See the ' + (item.content_metadata.fan_outs_used || []).length + ' questions'"></span>
+                  </button>
+                  <ol x-show="expandFanouts" x-collapse class="mt-2 space-y-1.5 text-[11px]">
+                    <template x-for="(q, i) in (item.content_metadata.fan_outs_used || [])" :key="i">
+                      <li class="flex items-start gap-2 leading-snug">
+                        <span class="tabular-nums text-charcoal-light w-4 flex-shrink-0" x-text="(i + 1) + '.'"></span>
+                        <span :class="isFanoutCovered(q) ? 'text-emerald-600' : 'text-amber-600'"
+                              x-text="isFanoutCovered(q) ? '✓' : '○'"
+                              class="flex-shrink-0"></span>
+                        <span class="text-charcoal-dark flex-1" x-text="q"></span>
+                        <template x-if="i === 0">
+                          <span class="text-[9px] font-medium text-purple-700 bg-purple-50 border border-purple-100 rounded px-1 py-px whitespace-nowrap flex-shrink-0"
+                                title="Primary fan-out — the query used to build the article's SEO brief (keyword grammes + competitor SOSEO/DSEO targets).">★ Primary</span>
+                        </template>
+                      </li>
+                    </template>
+                  </ol>
+                </div>
+              </template>
+            </div>
+
+            {/* ── Content makeup ──────────────────────────────── */}
+            <div class="mt-4 pt-3 border-t border-gray-100">
+              <p class="text-[10px] uppercase tracking-wide font-semibold text-charcoal-light mb-2">Content</p>
+
+              {/* Length vs SERP-target median */}
+              <div class="mb-3">
+                <div class="flex items-baseline justify-between text-[12px]">
+                  <span class="text-charcoal-dark font-medium inline-flex items-center gap-1">
+                    Article length
+                    <span class="cursor-help select-none text-charcoal-light text-[10px]"
+                          title="SEO jargon : the target shown here is the median word count of the top 10 Google SERP results for this exact query (computed live, not hardcoded).&#10;&#10;Matching ±15% of the SERP median reads as 'naturally competitive length' to both Google and AI assistants. Far above can read as padded ; far below as thin.">ⓘ</span>
+                  </span>
+                  <span class="tabular-nums font-semibold" :class="wordCountStatusClass()">
+                    <span x-text="wordCountStatusLabel()"></span>
+                    <span class="text-charcoal-light text-[11px] ml-1" x-text="wordCountCurrentLabel()"></span>
+                  </span>
+                </div>
+                <p class="text-[10px] text-charcoal-light mt-1" x-text="wordCountTargetLine()"></p>
+              </div>
+
+              {/* Sources — density rating + expandable by-type */}
+              <div>
+                <div class="flex items-baseline justify-between text-[12px]">
+                  <span class="text-charcoal-dark font-medium inline-flex items-center gap-1">
+                    Distinct sources
+                    <span class="cursor-help select-none text-charcoal-light text-[10px]"
+                          title="SEO/E-E-A-T jargon : every <a href> URL in the generated article, deduplicated. High source density signals editorial rigour (Google E-E-A-T : Experience, Expertise, Authoritativeness, Trustworthiness).&#10;&#10;Industry baseline for long-form (>1500 words):&#10;• &lt;5 : thin sourcing (E-E-A-T risk)&#10;• 5-9 : solid baseline&#10;• 10-15 : rich (long-form quality)&#10;• 16+ : reference-grade editorial density">ⓘ</span>
+                  </span>
+                  <span class="tabular-nums font-semibold" :class="sourcesDensityClass()">
+                    <span x-text="sourcesDensityLabel()"></span>
+                    <span class="text-charcoal-light text-[11px] ml-1"
+                          x-text="(item.content_metadata.sources_count != null ? item.content_metadata.sources_count : (item.content_metadata.sources_used || []).length)"></span>
+                  </span>
+                </div>
+                <p x-show="sourcesBreakdownLine()" class="text-[10px] text-charcoal-light mt-1" x-text="sourcesBreakdownLine()"></p>
+
+                {/* C.1.11 — 2-level progressive disclosure for sources :
+                    Level 1 = expand to see category headers (Brand / Scientific /
+                    Review / Editorial / Institutional / Competitor) with counts.
+                    Level 2 = click any category row to expand its URL list.
+                    Rationale : 16 URLs all at once is a wall ; the user usually
+                    wants to verify ONE category at a time (e.g. "are the
+                    scientific sources real ?", "any competitor leaks ?"). */}
+                <template x-if="(item.content_metadata.sources_used || []).length > 0">
+                  <div class="mt-1.5">
+                    <button type="button"
+                            @click="expandSources = !expandSources"
+                            class="text-[10px] text-purple-700 hover:text-purple-900 inline-flex items-center gap-1">
+                      <svg class="w-3 h-3 transition-transform"
+                           :class="expandSources ? 'rotate-90' : ''"
+                           fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+                      </svg>
+                      <span x-text="expandSources
+                            ? 'Hide source types'
+                            : 'See the ' + sourcesGroupedByType().length + ' source type' + (sourcesGroupedByType().length > 1 ? 's' : '')"></span>
+                    </button>
+                    <div x-show="expandSources" x-collapse class="mt-2 space-y-1">
+                      <template x-for="grp in sourcesGroupedByType()" :key="grp.type">
+                        <div>
+                          {/* Level 1 — category row (clickable, chevron) */}
+                          <button type="button"
+                                  @click="toggleSourceType(grp.type)"
+                                  class="w-full flex items-center gap-1.5 py-1 px-1.5 rounded hover:bg-gray-50 text-left">
+                            <svg class="w-2.5 h-2.5 transition-transform flex-shrink-0"
+                                 :class="isSourceTypeExpanded(grp.type) ? 'rotate-90' : ''"
+                                 fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                              <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+                            </svg>
+                            <span class="text-[11px] font-semibold flex-1"
+                                  :class="sourceTypeColorClass(grp.type)"
+                                  x-text="grp.label"></span>
+                            <span class="text-[10px] text-charcoal-light tabular-nums"
+                                  x-text="grp.items.length"></span>
+                          </button>
+                          {/* Level 2 — URL list (collapsed by default) */}
+                          <ul x-show="isSourceTypeExpanded(grp.type)" x-collapse
+                              class="ml-5 mt-0.5 space-y-0.5 text-[11px]">
+                            <template x-for="s in grp.items" :key="s.url">
+                              <li class="flex items-start gap-1.5">
+                                <a :href="s.url" target="_blank" rel="noopener"
+                                   class="text-purple-700 hover:text-purple-900 hover:underline truncate flex-1"
+                                   :title="s.url"
+                                   x-text="s.domain + (s.anchor ? ' — ' + s.anchor.slice(0, 50) : '')"></a>
+                              </li>
+                            </template>
+                          </ul>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+            {/* ── Footer — duration + timestamp ──────────────── */}
+            {/* C.1.10 — removed the useless title hint on duration. */}
+            <div class="mt-4 pt-2 border-t border-gray-100 flex items-center justify-between text-[10px] text-charcoal-light">
+              <span>⏱ <span x-text="formatDurationMs(item.content_metadata.duration_ms)"></span></span>
+              <span x-show="item.content_metadata.generated_at" x-text="fmtDateOf(item.content_metadata.generated_at)"></span>
+            </div>
+          </section>
+        </template>
+
         {/* Published URL + position tracking (only on published items) */}
         <template x-if="item.status === 'published'">
           <section class="bg-white rounded-xl border border-gray-200 p-5">
@@ -1307,8 +1608,110 @@ function fmtDate(iso: string | null): string {
       font-weight: 600;
     }
     /* Non-FAQ fallback (plain p / headings for non-Schema.org content) */
-    .prose:not(.faq-rendered) h2 { font-size: 1.05rem; font-weight: 600; margin: 1rem 0 0.5rem; }
-    .prose:not(.faq-rendered) p { margin: 0.5rem 0; line-height: 1.5; }
+    .prose:not(.faq-rendered):not(.article-rendered) h2 { font-size: 1.05rem; font-weight: 600; margin: 1rem 0 0.5rem; }
+    .prose:not(.faq-rendered):not(.article-rendered) p { margin: 0.5rem 0; line-height: 1.5; }
+
+    /* C.1.6 — Article-rendered scope (Schema.org Article).
+       Mirrors the Law-of-Proximity / Aesthetic-Usability intent of the FAQ
+       scope but for long-form articles : headings hierarchy, tables, lists,
+       blockquote, callouts. Without this scope the article renders as
+       undifferentiated plaintext (no heading weight, tables collapsed). */
+    .article-rendered.prose { font-size: 0.9rem; color: #2d2d2d; line-height: 1.65; }
+    .article-rendered.prose h1 {
+      font-size: 1.5rem; font-weight: 700; color: #1a1a1a;
+      margin: 0 0 1rem; line-height: 1.25;
+    }
+    .article-rendered.prose h2 {
+      font-size: 1.2rem; font-weight: 700; color: #1a1a1a;
+      margin: 2rem 0 0.75rem; padding-bottom: 0.4rem;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    .article-rendered.prose h3 {
+      font-size: 1.02rem; font-weight: 600; color: #2d2d2d;
+      margin: 1.25rem 0 0.5rem;
+    }
+    .article-rendered.prose h4 {
+      font-size: 0.92rem; font-weight: 600; color: #2d2d2d;
+      margin: 1rem 0 0.4rem;
+    }
+    .article-rendered.prose p {
+      margin: 0.6rem 0; line-height: 1.7;
+    }
+    .article-rendered.prose ul,
+    .article-rendered.prose ol {
+      margin: 0.75rem 0; padding-left: 1.5rem;
+    }
+    .article-rendered.prose ul { list-style: disc; }
+    .article-rendered.prose ol { list-style: decimal; }
+    .article-rendered.prose li {
+      margin: 0.3rem 0; line-height: 1.6;
+    }
+    .article-rendered.prose blockquote {
+      margin: 1rem 0; padding: 0.75rem 1rem;
+      background-color: #fafafa;
+      border-left: 3px solid #ff7066;  /* coral — same as FAQ mainEntity */
+      border-radius: 0.375rem;
+      color: #4a4a4a; font-style: italic;
+    }
+    .article-rendered.prose a {
+      color: #ff7066; text-decoration: underline; font-weight: 500;
+    }
+    .article-rendered.prose a[target="_blank"]::after,
+    .article-rendered.prose a[href^="http"]:not([href*="sen-ai.fr"])::after {
+      content: " ↗"; font-size: 0.85em;
+    }
+    /* Tables — the seo-llm article emits a non-Markdown table for reviews
+       (sephora/amazon ratings). Without these borders/padding, columns
+       collapse to a single line of plaintext. */
+    .article-rendered.prose table {
+      width: 100%; margin: 1rem 0;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      border: 1px solid #e5e7eb;
+    }
+    .article-rendered.prose thead {
+      background-color: #f9fafb;
+    }
+    .article-rendered.prose th,
+    .article-rendered.prose td {
+      padding: 0.5rem 0.75rem;
+      text-align: left;
+      border: 1px solid #e5e7eb;
+    }
+    .article-rendered.prose th {
+      font-weight: 600; color: #1a1a1a;
+    }
+    /* Schema.org Article wrapper — section[itemtype*="Article"] sometimes
+       wraps the body in seo-llm output. Treat like a transparent container. */
+    .article-rendered.prose section[itemtype*="Article"] {
+      display: block;
+    }
+    /* Callout cards seo-llm emits via <div class="callout"> or similar
+       (some sections render as soft-bordered boxes). Defensive style. */
+    .article-rendered.prose div.callout,
+    .article-rendered.prose aside {
+      margin: 1rem 0; padding: 0.85rem 1rem;
+      background-color: #fafafa;
+      border-left: 3px solid #d1d5db;
+      border-radius: 0.375rem;
+    }
+    /* Brand mention chips — same colour code as FAQ for cross-page consistency
+       (Jakob's Law). Reuse both class variants. */
+    .article-rendered.prose mark.brand-mention.own,
+    .article-rendered.prose mark.brand-mention {
+      background-color: #d1fae5 !important;
+      color: #065f46 !important;
+      padding: 0.05rem 0.3rem;
+      border-radius: 0.2rem;
+      font-weight: 600;
+    }
+    .article-rendered.prose mark.brand-mention.competitor {
+      background-color: #ffedd5 !important;
+      color: #9a3412 !important;
+      padding: 0.05rem 0.3rem;
+      border-radius: 0.2rem;
+      font-weight: 600;
+    }
   </style>
 
   <script is:inline>
@@ -1323,6 +1726,12 @@ function fmtDate(iso: string | null): string {
         openRejectModal: false,
         openPublishModal: false,
         publishUrl: '',
+        // C.1.9 — KPI card expandables (fan-out list, sources by type).
+        // C.1.11 — sources is now 2-level : `expandSources` shows the type
+        // headers, `expandedSourceTypes[type]` controls each per-type URL list.
+        expandFanouts: false,
+        expandSources: false,
+        expandedSourceTypes: {},
         generating: false,
         generateError: '',
         generatePollTimer: null,
@@ -1367,6 +1776,325 @@ function fmtDate(iso: string | null): string {
         fmtDateOf(iso) {
           if (!iso) return '—';
           return new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+        },
+        // C.1.6 / C.1.8 — KPI card helpers (Generation Quality).
+        // Plain-language status labels + dynamic SERP-derived targets.
+        // All helpers degrade gracefully when content_metadata is partial.
+        formatWordCount(targetWordCount, html) {
+          if (typeof targetWordCount === 'number' && targetWordCount > 0) {
+            return targetWordCount.toLocaleString('fr-FR') + ' words';
+          }
+          if (!html) return '— words';
+          const txt = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+          if (!txt) return '— words';
+          const n = txt.split(' ').length;
+          return n.toLocaleString('fr-FR') + ' words';
+        },
+        formatDurationMs(ms) {
+          if (!ms || ms < 0) return '—';
+          const sec = Math.floor(ms / 1000);
+          if (sec < 60) return sec + 's';
+          const m = Math.floor(sec / 60);
+          const s = sec % 60;
+          return m + 'm' + (s > 0 ? s.toString().padStart(2, '0') + 's' : '');
+        },
+        // ── Verdict ────────────────────────────────────────────────
+        qualityVerdictLabel() {
+          const v = (this.item.content_metadata || {}).validation_verdict || '—';
+          const map = {
+            APPROVED: '✓ Approved',
+            NEEDS_REVISION: '⚠ Needs revision',
+            REJECTED: '✗ Rejected',
+            ERROR: '✗ Error',
+          };
+          return map[v] || v;
+        },
+        qualityVerdictTooltip() {
+          // C.1.10 — tooltip adds context the pill alone doesn't carry
+          // (threshold value, what happens next). Don't repeat "approved".
+          const v = (this.item.content_metadata || {}).validation_verdict;
+          if (v === 'APPROVED') return 'All 7 editorial criteria scored above the 8/10 threshold. Ready to publish.';
+          if (v === 'NEEDS_REVISION') return 'At least one criterion scored below 8/10. Usable but worth a human pass.';
+          if (v === 'REJECTED') return 'Multiple criteria failed. Regenerate or edit substantially before publishing.';
+          if (v === 'ERROR') return 'Pipeline error — no verdict computed. Check Sentry or regenerate.';
+          return '';
+        },
+        editorialValidatorLine() {
+          // C.1.10 — terse caption ; the 7-criteria list lives in the ⓘ tooltip
+          // (was duplicated body + tooltip, against Jakob's Law of consistency).
+          const score = (this.item.content_metadata || {}).validation_score;
+          if (typeof score !== 'number' || score <= 0) return 'Validator score unavailable.';
+          const pass = score >= 8;
+          return pass
+            ? 'Validator: ' + score.toFixed(1) + ' / 10 (passes the ≥ 8 threshold).'
+            : 'Validator: ' + score.toFixed(1) + ' / 10 — below the ≥ 8 approval threshold.';
+        },
+        // ── Keyword coverage (SOSEO) ──────────────────────────────
+        soseoTarget() {
+          // Per-guide competitor median if available, else hardcoded fallback.
+          const t = (this.item.content_metadata || {}).target_soseo;
+          return (typeof t === 'number' && t > 0) ? Math.round(t) : 80;
+        },
+        soseoStatusLabel() {
+          const v = (this.item.content_metadata || {}).ytg_soseo || 0;
+          const tgt = this.soseoTarget();
+          if (v >= tgt) return '✓ Strong';
+          if (v >= tgt - 20) return '⚠ Near target';
+          return '✗ Weak';
+        },
+        soseoStatusClass() {
+          const v = (this.item.content_metadata || {}).ytg_soseo || 0;
+          const tgt = this.soseoTarget();
+          if (v >= tgt) return 'text-emerald-700';
+          if (v >= tgt - 20) return 'text-amber-700';
+          return 'text-red-700';
+        },
+        soseoBarClass() {
+          const v = (this.item.content_metadata || {}).ytg_soseo || 0;
+          const tgt = this.soseoTarget();
+          if (v >= tgt) return 'bg-emerald-500';
+          if (v >= tgt - 20) return 'bg-amber-500';
+          return 'bg-red-500';
+        },
+        soseoTargetLine() {
+          // C.1.10 — drop internal version codes from user-facing copy.
+          const m = this.item.content_metadata || {};
+          const tgt = this.soseoTarget();
+          const hasSerpTarget = (typeof m.target_soseo === 'number' && m.target_soseo > 0);
+          return hasSerpTarget
+            ? 'Target ≥ ' + tgt + ' · top SERP median for this topic'
+            : 'Target ≥ ' + tgt + ' (default) · no SERP analysis on this item';
+        },
+        // ── Topic diversity (DSEO) ────────────────────────────────
+        dseoStatusLabel() {
+          const v = (this.item.content_metadata || {}).ytg_dseo || 0;
+          if (v >= 30 && v <= 70) return '✓ Balanced';
+          if (v < 30) return '⚠ Slightly thin';
+          if (v <= 85) return '⚠ Dense';
+          return '✗ Over-stuffed';
+        },
+        dseoStatusClass() {
+          const v = (this.item.content_metadata || {}).ytg_dseo || 0;
+          if (v >= 30 && v <= 70) return 'text-emerald-700';
+          if (v >= 20 && v <= 85) return 'text-amber-700';
+          return 'text-red-700';
+        },
+        dseoBarClass() {
+          const v = (this.item.content_metadata || {}).ytg_dseo || 0;
+          if (v >= 30 && v <= 70) return 'bg-emerald-500';
+          if (v >= 20 && v <= 85) return 'bg-amber-500';
+          return 'bg-red-500';
+        },
+        dseoTargetLine() {
+          // C.1.10 — terser, no jargon repetition (tooltip explains stuffing).
+          const m = this.item.content_metadata || {};
+          const hasSerpTarget = (typeof m.target_dseo === 'number' && m.target_dseo > 0);
+          return hasSerpTarget
+            ? 'Competitor median ' + Math.round(m.target_dseo) + ' · sweet spot 30–70'
+            : 'Sweet spot 30–70 (default)';
+        },
+        // ── AI fan-out coverage ───────────────────────────────────
+        fanoutCoverageLabel() {
+          const m = this.item.content_metadata || {};
+          const covered = (m.fanout_covered || []).length;
+          const total = (m.fan_outs_used || []).length;
+          if (total > 0) return covered + ' / ' + total;
+          if (typeof m.fanout_coverage === 'number') return String(m.fanout_coverage);
+          return '—';
+        },
+        fanoutCoverageStatusLabel() {
+          const m = this.item.content_metadata || {};
+          const covered = (m.fanout_covered || []).length;
+          const total = (m.fan_outs_used || []).length;
+          if (total === 0) return ((m.fanout_coverage || 0) > 0) ? '✓ Covered' : '— None';
+          if (covered >= total) return '✓ All answered';
+          if (covered >= total - 1) return '✓ Almost all';
+          if (covered >= Math.ceil(total / 2)) return '⚠ Partial';
+          return '✗ Sparse';
+        },
+        fanoutCoverageOk() {
+          const m = this.item.content_metadata || {};
+          const covered = (m.fanout_covered || []).length;
+          const total = (m.fan_outs_used || []).length;
+          if (total === 0) return (m.fanout_coverage || 0) >= 1;
+          return covered >= Math.max(1, total - 1);
+        },
+        fanoutCoverageDetail() {
+          const m = this.item.content_metadata || {};
+          const total = (m.fan_outs_used || []).length;
+          if (total === 0) return 'AI-extracted question variants from your scan.';
+          return total + ' question variant' + (total > 1 ? 's' : '')
+               + ' Google SGE / ChatGPT / Claude reformulated from your question.';
+        },
+        // ── Fan-out per-query covered check ──────────────────────
+        // C.1.9 — used by the expandable list to render ✓ vs ○ per query.
+        // fanout_covered may store either the full query strings OR a list
+        // of indices into fan_outs_used. Handle both shapes defensively.
+        isFanoutCovered(query) {
+          const m = this.item.content_metadata || {};
+          const covered = m.fanout_covered || [];
+          if (!covered.length) return false;
+          if (typeof covered[0] === 'number') {
+            const idx = (m.fan_outs_used || []).indexOf(query);
+            return idx >= 0 && covered.includes(idx);
+          }
+          return covered.includes(query);
+        },
+        // ── Word count vs SERP-target median ─────────────────────
+        // C.1.9 — show the article length as a status badge against the
+        // seo-llm-computed target_word_count (SERP top-10 median).
+        // When target is missing (legacy items), display industry baseline.
+        _currentWordCount() {
+          const m = this.item.content_metadata || {};
+          if (typeof m.target_word_count === 'number' && m.target_word_count > 0 && m.target_word_count !== m.actual_word_count) {
+            // target_word_count may also be persisted as the *computed* count
+            // depending on the seo-llm output shape ; prefer the actual
+            // article HTML count for the LEFT side, target for comparison.
+          }
+          const html = this.item.content_html || '';
+          if (!html) return 0;
+          const txt = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+          return txt ? txt.split(' ').length : 0;
+        },
+        wordCountCurrentLabel() {
+          const n = this._currentWordCount();
+          return n > 0 ? n.toLocaleString('fr-FR') + ' words' : '— words';
+        },
+        wordCountStatusLabel() {
+          const m = this.item.content_metadata || {};
+          const tgt = (typeof m.target_word_count === 'number' && m.target_word_count > 0) ? m.target_word_count : 0;
+          const n = this._currentWordCount();
+          if (!n) return '—';
+          if (!tgt) {
+            // No SERP target → industry baseline
+            if (n < 800) return '⚠ Short';
+            if (n <= 3500) return '✓ Long-form';
+            return '⚠ Very long';
+          }
+          const delta = ((n - tgt) / tgt) * 100;
+          if (delta >= -15 && delta <= 15) return '✓ On target';
+          if (delta > 15) return (delta > 50 ? '⚠ Over (+' : '✓ Above (+') + delta.toFixed(0) + '%)';
+          return '⚠ Below (' + delta.toFixed(0) + '%)';
+        },
+        wordCountStatusClass() {
+          const m = this.item.content_metadata || {};
+          const tgt = (typeof m.target_word_count === 'number' && m.target_word_count > 0) ? m.target_word_count : 0;
+          const n = this._currentWordCount();
+          if (!n) return 'text-charcoal-light';
+          if (!tgt) {
+            if (n < 800) return 'text-amber-700';
+            if (n <= 3500) return 'text-emerald-700';
+            return 'text-amber-700';
+          }
+          const delta = ((n - tgt) / tgt) * 100;
+          if (delta >= -15 && delta <= 15) return 'text-emerald-700';
+          if (delta > 50 || delta < -30) return 'text-amber-700';
+          return 'text-emerald-700';
+        },
+        wordCountTargetLine() {
+          // C.1.10 — terser, "Top SERP median" instead of "median of top 10…".
+          const m = this.item.content_metadata || {};
+          const tgt = (typeof m.target_word_count === 'number' && m.target_word_count > 0) ? m.target_word_count : 0;
+          if (tgt) {
+            return 'Target ' + tgt.toLocaleString('fr-FR') + ' words · top SERP median';
+          }
+          return 'Industry baseline 1 500–3 000 words · no SERP target on this item';
+        },
+        // ── Sources density rating (industry baseline) ───────────
+        // C.1.9 — surfaces "Rich/Solid/Thin" status next to the count.
+        sourcesDensityLabel() {
+          const m = this.item.content_metadata || {};
+          const n = (m.sources_count != null ? m.sources_count : (m.sources_used || []).length);
+          if (!n) return '—';
+          if (n >= 16) return '✓ Reference-grade';
+          if (n >= 10) return '✓ Rich';
+          if (n >= 5)  return '✓ Solid';
+          return '⚠ Thin';
+        },
+        sourcesDensityClass() {
+          const m = this.item.content_metadata || {};
+          const n = (m.sources_count != null ? m.sources_count : (m.sources_used || []).length);
+          if (!n) return 'text-charcoal-light';
+          if (n >= 5) return 'text-emerald-700';
+          return 'text-amber-700';
+        },
+        // ── Sources grouped by type (for expandable URL list) ────
+        sourcesGroupedByType() {
+          const used = (this.item.content_metadata || {}).sources_used || [];
+          if (!used.length) return [];
+          const order = ['brand', 'scientific', 'institutional', 'review', 'editorial', 'competitor'];
+          const groups = {};
+          used.forEach(s => {
+            const t = (s.type || s.org_type || 'editorial').toLowerCase();
+            if (!groups[t]) groups[t] = [];
+            groups[t].push(s);
+          });
+          const labelMap = {
+            brand: 'Brand', scientific: 'Scientific', institutional: 'Institutional',
+            review: 'Review platforms', editorial: 'Editorial / press', competitor: 'Competitor',
+            reference: 'Cited URLs',
+          };
+          const out = [];
+          order.forEach(k => {
+            if (groups[k]) out.push({ type: k, label: labelMap[k] || k, items: groups[k] });
+          });
+          Object.keys(groups).forEach(k => {
+            if (!order.includes(k)) out.push({ type: k, label: labelMap[k] || k, items: groups[k] });
+          });
+          return out;
+        },
+        // C.1.11 — 2-level expand state helpers for sources.
+        toggleSourceType(type) {
+          this.expandedSourceTypes = {
+            ...this.expandedSourceTypes,
+            [type]: !this.expandedSourceTypes[type],
+          };
+        },
+        isSourceTypeExpanded(type) {
+          return !!this.expandedSourceTypes[type];
+        },
+        sourceTypeColorClass(type) {
+          // C.1.10 — colour-coding stays semantic (Von Restorff). Review was
+          // amber which implied "warning" — reviews are POSITIVE E-E-A-T,
+          // demote to neutral charcoal. Reserve amber+red for true warnings.
+          const map = {
+            brand:         'text-emerald-700',
+            scientific:    'text-blue-700',
+            institutional: 'text-purple-700',
+            review:        'text-charcoal-dark',
+            editorial:     'text-charcoal-dark',
+            competitor:    'text-red-700',
+          };
+          return map[type] || 'text-charcoal-dark';
+        },
+        // ── Sources breakdown ─────────────────────────────────────
+        // C.1.8 — show a per-type split (Brand · Scientific · Review …) only
+        // when the classification is meaningful. Legacy items generated before
+        // C.1.8 have every source tagged 'reference' — in that case (or any
+        // single-type case) we fall back to a neutral "unique URLs" caption.
+        sourcesBreakdownLine() {
+          // C.1.10 — return '' (not "unique URLs") for single-type so the
+          // caption can be hidden by x-show. "Distinct" in the label already
+          // implies deduplicated — no need to say it twice.
+          const m = this.item.content_metadata || {};
+          const used = m.sources_used || [];
+          if (!used.length) return '';
+          const counts = {};
+          used.forEach(s => {
+            const t = (s.type || s.org_type || 'editorial').toLowerCase();
+            counts[t] = (counts[t] || 0) + 1;
+          });
+          const keys = Object.keys(counts);
+          if (keys.length === 1) return '';  // no meaningful breakdown
+          const ordered = ['brand', 'scientific', 'review', 'editorial', 'institutional', 'competitor'];
+          const parts = [];
+          ordered.forEach(k => {
+            if (counts[k]) parts.push(k.charAt(0).toUpperCase() + k.slice(1) + ' ' + counts[k]);
+          });
+          Object.keys(counts).forEach(k => {
+            if (!ordered.includes(k)) parts.push(k.charAt(0).toUpperCase() + k.slice(1) + ' ' + counts[k]);
+          });
+          return parts.join(' · ');
         },
         saveStateClass() {
           return {
@@ -2334,6 +3062,34 @@ function fmtDate(iso: string | null): string {
           const n = ip.phase_num || 1;
           const t = ip.phase_total || 5;
           return n + '/' + t + ' · ' + ip.phase_label;
+        },
+
+        progressPhasesTooltip() {
+          // C.1.12 — plain-language explanation of the 5 article-gen phases
+          // for curious users hovering the live progress chip.
+          // C.2.6 — terse rewrite : browser native title tooltips truncate
+          // past ~1024 chars on most OSes, so one tight sentence per phase.
+          // Markers : ▸ current · ✓ done · empty for upcoming.
+          const ip = (this.item && this.item.content_metadata && this.item.content_metadata.in_progress) || {};
+          const current = ip.phase_num || 0;
+          const phases = [
+            ['Preparing brand context', '~30s – 2m',
+             'Load brand, competitors, target media profile (tone + length envelope).'],
+            ['Fetching grounding sources', '~2-4m',
+             'Scrape brand site, scientific papers, user reviews, SERP competitors.'],
+            ['Writing article sections', '~3-6m',
+             'LLM composes section by section, weaving keywords, citations, brand voice and media tone. Longest phase.'],
+            ['Validating quality', '~1-4m',
+             '7-criteria editorial review. Auto-rewrites sections that miss the per-topic SEO targets.'],
+            ['Finalizing HTML', '~30s',
+             'Schema.org wrapping + cleanup (strip artefacts, dedup sources, restore links).'],
+          ];
+          const lines = phases.map((p, i) => {
+            const num = i + 1;
+            const marker = num === current ? '▸' : (num < current ? '✓' : ' ');
+            return marker + ' ' + num + '. ' + p[0] + '  (' + p[1] + ')\n   ' + p[2];
+          });
+          return '5 phases · typical 6-15 min total\n\n' + lines.join('\n\n');
         },
 
         init() {
