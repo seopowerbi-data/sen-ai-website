@@ -34,6 +34,15 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     topics = {str(t.id): t for t in db.query(ScanTopic).filter(ScanTopic.scan_id == scan_id).all()}
 
     counts = {"critique": 0, "haute": 0, "moyenne": 0}
+    # Phase B Tier A — intent categories where a third-party brand
+    # placement is editorially inappropriate. The pipeline correctly
+    # refuses to weave the brand into safety / SAV / contre-indication
+    # answers (pharma compliance), which then triggers LOW_QUALITY_SKIP.
+    # Dropping the opportunity upstream is the right fix: user never
+    # sees the opportunity, no content_credit ever debited.
+    # NULL intent_category = unclassified (= treated as promotional_fit
+    # for legacy rows; the classifier handler populates new rows).
+    _SAFETY_INTENTS = {"safety_warning", "side_effects", "contre_indication", "complaint_sav"}
 
     for r in results:
         q = db.query(ScanQuestion).filter(ScanQuestion.id == r.question_id).first()
@@ -79,6 +88,19 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
         )
 
         if priority:
+            # Phase B Tier A — drop critique opportunities on safety /
+            # side-effects / contre-indication / SAV intents. Brand
+            # placement reads awkward there and the generator would
+            # LOW_QUALITY_SKIP downstream anyway. Other priorities
+            # (haute / moyenne) still flow through — they aren't
+            # netlinking-prone and the recommended_action is either
+            # content_update (existing brand page tweak) or None.
+            if priority == "critique" and q.intent_category in _SAFETY_INTENTS:
+                logger.info(
+                    f"Skipped critique opportunity for question {q.id} "
+                    f"(intent={q.intent_category})"
+                )
+                continue
             # Determine recommended action
             if priority == "critique":
                 action = "faq" if not best_competitor_domain else "netlinking"

@@ -1325,6 +1325,32 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
 
     db.commit()
 
+    # ── Phase B Tier C — auto-refund on LOW_QUALITY_SKIP ──────────────
+    # seo-llm's LOW_QUALITY_SKIP verdict fires when the validator decides
+    # the generated article is unsalvageable (typically: zero LEAD brand
+    # mentions on a safety/contre-indication question where the brand
+    # cannot be naturally woven in — see project_phase_b_intent_classifier_gap).
+    # The handler returns successfully so the worker's exception-path
+    # refund logic in main.py is NOT triggered — we have to refund
+    # explicitly here. _refund_content_item_credit is net-aware and
+    # idempotent: if a refund row for this item already exists the call
+    # is a no-op, so this is safe even if a future code path also refunds.
+    if validation_verdict == "LOW_QUALITY_SKIP":
+        try:
+            from main import _refund_content_item_credit
+            _refund_content_item_credit(
+                scan_id, item_id, db,
+                job_type="generate_article",
+            )
+            logger.info(
+                f"auto-refund: LOW_QUALITY_SKIP on item {item_id}, "
+                f"3 content_credits refunded"
+            )
+        except Exception:
+            logger.exception(
+                f"auto-refund failed for LOW_QUALITY_SKIP item {item_id}"
+            )
+
     # ── Log LLM usage (coarse — pipeline mixes providers per phase) ─
     try:
         from adapters.llm_logger import log_llm_usage

@@ -446,6 +446,13 @@ class ScanQuestion(Base):
     # Populated lazily by services.fan_out_extractor on first article gen.
     # PARITÉ obligatoire avec worker/models.py (foot-gun #18).
     fan_out_queries = Column(JSONB, nullable=False, default=list)
+    # Phase B Tier A (migration 035) — Haiku-classified intent category.
+    # NULL = not yet classified (legacy / unclassified rows; opportunity
+    # scorer treats as promotional_fit). One of: promotional_fit,
+    # informational_neutral, safety_warning, side_effects,
+    # contre_indication, complaint_sav, other.
+    # PARITÉ obligatoire avec worker/models.py (foot-gun #18).
+    intent_category = Column(String(40), nullable=True)
 
     persona = relationship("ScanPersona", back_populates="questions")
 

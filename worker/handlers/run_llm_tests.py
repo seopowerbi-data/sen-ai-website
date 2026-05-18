@@ -448,7 +448,11 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
         "refund_info": refund_info,
     }
 
-    # Chain: generate opportunities + editorial + cleanup brands
+    # Chain: classify intent (Phase B Tier A) → opportunities + editorial
+    # + cleanup brands. Worker poll is FIFO single-thread, so
+    # classify_question_intent runs first and populates intent_category
+    # before generate_opportunities reads it.
+    db.add(JobModel(scan_id=scan_id, job_type="classify_question_intent"))
     db.add(JobModel(scan_id=scan_id, job_type="generate_opportunities"))
     db.add(JobModel(scan_id=scan_id, job_type="generate_editorial"))
     db.add(JobModel(scan_id=scan_id, job_type="cleanup_brands"))

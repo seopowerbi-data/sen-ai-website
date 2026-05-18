@@ -262,9 +262,62 @@ function fmtDate(iso: string | null): string {
               <dd class="text-charcoal-dark mt-0.5" x-text="item.persona_name || '—'"></dd>
             </div>
             <div class="sm:col-span-2">
-              <dt class="text-[10px] uppercase tracking-wide text-charcoal-light">Question</dt>
+              <dt class="text-[10px] uppercase tracking-wide text-charcoal-light flex items-center gap-2">
+                <span>Question</span>
+                {/* Phase B Tier A — intent chip from the Haiku
+                    classifier. Hidden for promotional_fit / other
+                    (the common case — no need to surface). */}
+                <template x-if="intentChip()">
+                  <span class="text-[9px] font-medium px-1.5 py-0.5 rounded normal-case tracking-normal"
+                        :class="intentChip().cls"
+                        :title="'Question intent: ' + intentChip().label + '. Classified by the scan pipeline so non-promotional questions stop burning content credits on LOW_QUALITY_SKIP.'">
+                    <span x-text="intentChip().label"></span>
+                  </span>
+                </template>
+              </dt>
               <dd class="text-charcoal-dark mt-0.5 italic" x-text="item.target_question || '—'"></dd>
             </div>
+
+            {/* Phase B — safety-intent warning (Tier B patch ahead of the
+                full intent classifier). Heuristic regex flags questions
+                about side effects, contre-indications or "should I stop"
+                framing where a third-party brand placement reads
+                awkwardly. LLMs correctly stay conservative on pharma
+                safety topics -> 0 brand mentions -> LOW_QUALITY_SKIP ->
+                3 content_credits burned for nothing. The banner gives
+                the user a chance to reject the opportunity before the
+                debit, or generate anyway with eyes open.
+                Mirrors the Tier A intent_category filter in
+                worker/handlers/generate_opportunities.py once that
+                ships; until then, this regex is the only signal. */}
+            <template x-if="item.content_type === 'netlinking_article' && hasSafetyIntent(item.target_question)">
+              <div class="sm:col-span-2 mt-2 p-3 bg-amber-50 border border-amber-300 rounded-md text-[12px] text-amber-900 leading-relaxed">
+                <div class="flex items-start gap-2">
+                  <span class="text-amber-600 mt-0.5">⚠</span>
+                  <div class="space-y-2 flex-1">
+                    <p>
+                      <strong>This question reads as a safety or side-effect concern.</strong>
+                      A third-party brand rarely fits naturally in the answer, so the
+                      pipeline tends to skip the article and refund nothing.
+                    </p>
+                    <p class="text-amber-800/90">
+                      Risk: <strong>LOW_QUALITY_SKIP</strong> + 3 content credits
+                      burned on a draft the system rejects itself.
+                    </p>
+                    <template x-if="item.status === 'identified' || item.status === 'in_review'">
+                      <div class="flex items-center gap-2 flex-wrap pt-1">
+                        <button @click="openRejectModal = true"
+                                :disabled="saving"
+                                class="text-[11px] px-2 py-1 bg-white border border-amber-300 text-amber-900 hover:bg-amber-100 rounded font-medium disabled:opacity-40">
+                          Reject this opportunity
+                        </button>
+                        <span class="text-[10px] text-amber-700/80">or scroll down and Generate anyway.</span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </div>
+            </template>
             <div class="sm:col-span-2">
               <dt class="text-[10px] uppercase tracking-wide text-charcoal-light flex items-center gap-2">
                 <span x-text="item.content_type === 'netlinking_article' ? 'Media partner URL' : 'Target page'"></span>
@@ -2299,6 +2352,63 @@ function fmtDate(iso: string | null): string {
             target_url: c.url,
             target_page_title: c.title || null,
           });
+        },
+
+        // Phase B Tier A signal — prefer the Haiku classifier output
+        // (content_metadata.intent_category, populated by the worker's
+        // classify_question_intent handler) when present. Returns the
+        // raw category string or '' if unclassified.
+        intentCategory() {
+          const meta = this.item.content_metadata || {};
+          return meta.intent_category || '';
+        },
+
+        // Phase B Tier B — heuristic safety-intent detector. Used as a
+        // fallback when intent_category is missing (legacy scan before
+        // Tier A shipped, or classification skipped due to missing API
+        // key). Multi-lingual best-effort regex covering FR + EN.
+        // Returns false when the question is empty.
+        hasSafetyIntent(question) {
+          // Prefer the classifier's verdict when available.
+          const cat = this.intentCategory();
+          if (cat) {
+            return ['safety_warning', 'side_effects', 'contre_indication', 'complaint_sav'].includes(cat);
+          }
+          if (!question) return false;
+          const q = String(question).toLowerCase();
+          const patterns = [
+            /\bdois[- ]je arr[eê]ter\b/,
+            /\best[- ]ce dangereux\b/,
+            /\bp[èe]le\b/,
+            /\brougit\b/,
+            /\beffets? ind[eé]sirables?\b/,
+            /\bcontre[- ]indications?\b/,
+            /\br[eé]agit mal\b/,
+            /\birritation\b/,
+            /\binflammation\b/,
+            /\bshould i stop\b/,
+            /\bside effects?\b/,
+            /\badverse (effects?|reactions?)\b/,
+            /\bis it (safe|dangerous|harmful)\b/,
+            /\ballergic reaction\b/,
+          ];
+          return patterns.some(re => re.test(q));
+        },
+
+        // Phase B Tier A — chip metadata for the Question label.
+        // Returns { label, cls } when the question has a non-trivial
+        // classification; null otherwise (chip stays hidden).
+        intentChip() {
+          const cat = this.intentCategory();
+          if (!cat || cat === 'promotional_fit' || cat === 'other') return null;
+          const map = {
+            informational_neutral: { label: 'Informational', cls: 'bg-blue-100 text-blue-800' },
+            safety_warning:        { label: 'Safety',        cls: 'bg-amber-100 text-amber-800' },
+            side_effects:          { label: 'Side effects',  cls: 'bg-amber-100 text-amber-800' },
+            contre_indication:     { label: 'Contre-indication', cls: 'bg-amber-100 text-amber-800' },
+            complaint_sav:         { label: 'SAV',           cls: 'bg-amber-100 text-amber-800' },
+          };
+          return map[cat] || null;
         },
 
         // Short URL helper for the picker cards : strips scheme + host,

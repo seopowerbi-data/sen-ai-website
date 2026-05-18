@@ -93,6 +93,7 @@ def register_handler(job_type: str):
 def load_handlers():
     from handlers import (fetch_keywords, classify_topics, assign_keywords,
                           generate_personas, generate_persona_questions,
+                          classify_question_intent,
                           run_llm_tests, generate_editorial,
                           detect_competitors, generate_opportunities, cleanup_brands,
                           generate_domain_brief, generate_client_brief,
@@ -108,6 +109,7 @@ def load_handlers():
     HANDLERS["detect_competitors"] = detect_competitors.execute
     HANDLERS["generate_personas"] = generate_personas.execute
     HANDLERS["generate_persona_questions"] = generate_persona_questions.execute
+    HANDLERS["classify_question_intent"] = classify_question_intent.execute
     HANDLERS["run_llm_tests"] = run_llm_tests.execute
     HANDLERS["generate_opportunities"] = generate_opportunities.execute
     HANDLERS["generate_editorial"] = generate_editorial.execute

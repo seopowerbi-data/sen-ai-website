@@ -679,6 +679,15 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
             skipped += 1
             continue
 
+        # Phase B Tier A — carry the intent_category through to the
+        # content item so the UI can render the chip (and the validation
+        # page can replace its Tier B regex heuristic with the actual
+        # classification). Stored in content_metadata to avoid yet
+        # another migration on ScanContentItem.
+        item_metadata = {}
+        if question.intent_category:
+            item_metadata["intent_category"] = question.intent_category
+
         item = ScanContentItem(
             scan_id=scan_id,
             content_type=ct,
@@ -693,6 +702,7 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
             best_competitor=opp.best_competitor_name,
             nb_competitors_cited=opp.nb_competitors_cited,
             status="identified",
+            content_metadata=item_metadata,
         )
         db.add(item)
         new_items.append((item, q_text, opp.topic_name, str(opp.question_id)))
