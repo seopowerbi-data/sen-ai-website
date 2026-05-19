@@ -37,10 +37,10 @@ stripe_lib.api_key = settings.stripe_api_key
 # Margin target: 6-13× across tiers.
 CREDIT_PACKS = {
     # ── Scan credits — new per-question packs (2026-05-19) ──
-    "scan_starter":     {"credit_type": "scan", "amount": 200,   "price_eur": 20,   "price_id": ""},
-    "scan_pro":         {"credit_type": "scan", "amount": 1000,  "price_eur": 80,   "price_id": ""},
-    "scan_agency":      {"credit_type": "scan", "amount": 5000,  "price_eur": 300,  "price_id": ""},
-    "scan_enterprise":  {"credit_type": "scan", "amount": 20000, "price_eur": 1000, "price_id": ""},
+    "scan_starter":     {"credit_type": "scan", "amount": 200,   "price_eur": 20,   "price_id": "price_1TYn1DAWSRE7HR2KY5KONhCc"},
+    "scan_pro":         {"credit_type": "scan", "amount": 1000,  "price_eur": 80,   "price_id": "price_1TYnABAWSRE7HR2KQsvGwJiD"},
+    "scan_agency":      {"credit_type": "scan", "amount": 5000,  "price_eur": 300,  "price_id": "price_1TYnBYAWSRE7HR2KtKjZh6FI"},
+    "scan_enterprise":  {"credit_type": "scan", "amount": 20000, "price_eur": 1000, "price_id": "price_1TYnDVAWSRE7HR2KTQo3JYmu"},
 
     # ── Content credits — unchanged ──
     "content_10":  {"credit_type": "content", "amount": 10,  "price_eur": 40,  "price_id": "price_1TJKp4AWSRE7HR2KtGXhcBEo"},
