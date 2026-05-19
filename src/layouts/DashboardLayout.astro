@@ -294,11 +294,11 @@ const icons = {
         <div class="flex gap-3 text-xs">
           <div class="flex items-center gap-1.5">
             <span class="w-2 h-2 rounded-full bg-blue-400"></span>
-            <span class="text-gray-300">{scanCredits} scans</span>
+            <span class="text-gray-300 tabular-nums">{scanCredits.toLocaleString('fr-FR')} scans</span>
           </div>
           <div class="flex items-center gap-1.5">
             <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
-            <span class="text-gray-300">{contentCredits} content</span>
+            <span class="text-gray-300 tabular-nums">{contentCredits.toLocaleString('fr-FR')} content</span>
           </div>
         </div>
       </div>
