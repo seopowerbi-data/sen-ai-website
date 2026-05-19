@@ -87,7 +87,11 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     if not llm_clients:
         raise RuntimeError("No LLM clients available")
 
-    # --- Build BrandAnalyzer from Scan focus brand + SBC competitors ---
+    # --- Build EntityAnalyzer (Sprint E) from Scan focus brand + SBC competitors ---
+    # EntityAnalyzer extends the legacy BrandAnalyzer to 5 entity types
+    # (brand/product/range/domain/expert_source) — wire-compatible with the
+    # existing ScanLLMResult.brand_mentions JSONB column. See
+    # worker/adapters/entity_analyzer.py + project_phase_judge_and_entities.md.
     brand_analyzer = None
     target_brands = []
     all_brands = []
@@ -95,86 +99,40 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     target_domain = scan_config.get("target_domains", [scan.domain])[0] if scan_config.get("target_domains") else scan.domain
 
     try:
-        if not scan.focus_brand_id:
-            logger.warning("no focus brand set, skipping BrandAnalyzer")
+        from adapters.entity_analyzer import EntityAnalyzer, build_target_entities_from_scan
+
+        target_entities, known_entities = build_target_entities_from_scan(scan, db)
+        # Keep target_brands populated for the scan summary payload (consumed
+        # downstream by /scans/{id}/results) — same data, just unpacked from
+        # the structured target_entities dict for legacy callers.
+        target_brands = list(target_entities["brands"])
+        all_brands = list(target_brands) + [k for k in known_entities if k.lower() not in {b.lower() for b in target_brands}]
+        all_brands = all_brands[:15]
+
+        if not scan.focus_brand_id and not target_entities["domains"]:
+            logger.warning("no focus brand AND no target domains — skipping EntityAnalyzer")
+        elif not gemini_pool.has_keys():
+            logger.info("EntityAnalyzer skipped: no Gemini key in pool")
         else:
-            focus_brand = db.query(ClientBrand).filter(ClientBrand.id == scan.focus_brand_id).first()
-            if not focus_brand:
-                logger.warning("no focus brand set, skipping BrandAnalyzer")
-            else:
-                # target_brands = focus brand + its children (via parent_id) + its aliases
-                # Rationale: a brand's "visibility" includes its product lines (gammes).
-                # For scan focus=Ducray, if the AI cites "Anaphase" (a Ducray gamme), that
-                # MUST count as a Ducray mention. Children are joined in at runtime so the
-                # user only picks one focus in the UI but gets the whole brand family tracked.
-                children = db.query(ClientBrand).filter(
-                    ClientBrand.parent_id == focus_brand.id
-                ).all()
-                raw_targets = (
-                    [focus_brand.name]
-                    + [c.name for c in children]
-                    + list(focus_brand.aliases or [])
-                )
-                seen = set()
-                target_brands = []
-                for t in raw_targets:
-                    if not t:
-                        continue
-                    t = t.strip()
-                    if not t:
-                        continue
-                    key = t.lower()
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    target_brands.append(t)
-                logger.info(
-                    f"Focus brand: {focus_brand.name} + {len(children)} children "
-                    f"→ {len(target_brands)} target_brands"
-                )
-
-                # Load competitor brands for THIS scan via SBC
-                competitor_rows = (
-                    db.query(ClientBrand)
-                      .join(ScanBrandClassification, ScanBrandClassification.brand_id == ClientBrand.id)
-                      .filter(ScanBrandClassification.scan_id == scan_id,
-                              ScanBrandClassification.classification == 'competitor')
-                      .all()
-                )
-
-                # all_brands = target_brands + competitors (dedupe, cap at 30)
-                all_brands = list(target_brands)
-                seen_all = set(b.lower() for b in all_brands)
-                for c in competitor_rows:
-                    if not c.name:
-                        continue
-                    key = c.name.strip().lower()
-                    if not key or key in seen_all:
-                        continue
-                    seen_all.add(key)
-                    all_brands.append(c.name)
-                # Limit competitor brands sent to BrandAnalyzer. Was 30 — caused JSON
-                # truncation on dense responses (28 brands → output > 20K tokens →
-                # Gemini cuts off mid-string → JSON parse fails → BrandAnalyzer skips).
-                # 15 keeps coverage of the most-mentioned competitors while staying
-                # well within the 30K-token output budget (see brand_analyzer.py:381).
-                all_brands = all_brands[:15]
-
-                if target_brands and gemini_pool.has_keys():
-                    from seo_llm.src.brand_analyzer import BrandAnalyzer
-                    gemini_client = create_llm_client("gemini", gemini_pool.next_key(), model="gemini-2.5-flash-lite")
-                    from adapters.brief_injector import format_analysis_context
-                    from models import Client as _Client
-                    _client = db.query(_Client).filter(_Client.id == scan.client_id).first()
-                    brand_analyzer = BrandAnalyzer(
-                        llm_client=gemini_client,
-                        target_brands=target_brands,
-                        all_brands=all_brands,
-                        domain_context=format_analysis_context(scan.config, _client.apps if _client else None),
-                    )
-                    logger.info(f"BrandAnalyzer configured: target={target_brands}, all={len(all_brands)} brands")
-                else:
-                    logger.info("BrandAnalyzer skipped: no target brands or no Gemini key")
+            gemini_client = create_llm_client("gemini", gemini_pool.next_key(), model="gemini-2.5-flash-lite")
+            from adapters.brief_injector import format_analysis_context
+            from models import Client as _Client
+            _client = db.query(_Client).filter(_Client.id == scan.client_id).first()
+            brand_analyzer = EntityAnalyzer(
+                llm_client=gemini_client,
+                target_entities=target_entities,
+                known_entities=known_entities,
+                domain_context=format_analysis_context(scan.config, _client.apps if _client else None),
+            )
+            logger.info(
+                f"EntityAnalyzer configured: targets="
+                f"{{brands:{len(target_entities['brands'])}, "
+                f"products:{len(target_entities['products'])}, "
+                f"ranges:{len(target_entities['ranges'])}, "
+                f"domains:{len(target_entities['domains'])}, "
+                f"expert_sources:{len(target_entities['expert_sources'])}}}, "
+                f"known={len(known_entities)}"
+            )
 
     except Exception as e:
         logger.warning(f"BrandAnalyzer setup failed: {e}")
