@@ -25,13 +25,19 @@ NEW_TO_OLD_CONTEXT = {
     "ignored": "ignore",
 }
 
-# Map OLD vocabulary (adapter response) -> NEW vocabulary (SBC.classification)
+# Map OLD vocabulary (adapter response) -> NEW vocabulary (SBC.classification).
+# Strict watchlist model (2026-05-19): brands the LLM judges commercial but
+# not in the user's declared watchlist go to `discovered` → stays unclassified
+# so the user reviews + opts in. Without this, dense scans (Avène: 584
+# auto-classified competitors) poisoned the "brand vs competitor" metrics by
+# treating any dermo-cosmetic brand as a tracked competitor.
 OLD_TO_NEW_RESPONSE = {
     "target_brand": "my_brand",
     "target_gamme": "my_brand",
     "target_product": "my_brand",
-    "competitor": "competitor",
-    "competitor_gamme": "competitor",
+    "competitor": "competitor",          # only when name matches the watchlist (see prompt)
+    "competitor_gamme": "competitor",     # gammes of brief-declared competitors
+    "discovered": "unclassified",         # commercial but unknown — user promotes if relevant
     "ignore": "ignored",
 }
 

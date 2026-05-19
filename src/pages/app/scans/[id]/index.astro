@@ -854,25 +854,53 @@ const isReviewing = effectiveView !== null && (
           </div>
         </div>
 
-        <!-- Unclassified inbox (flattened — parents + children rendered as pills) -->
+        <!-- Unclassified inbox — collapsible to keep the page scannable post-scan.
+             Default collapsed: most auto-detected brands are noise (the LLM
+             over-extracts brand-like strings during run_llm_tests). Progressive
+             disclosure + a one-click bulk-ignore covers the 80% case. -->
         <template x-if="flatUnclassified.length > 0">
-          <div class="bg-amber-50 border border-amber-200 rounded-xl p-5 mb-6"
+          <div class="bg-amber-50 border border-amber-200 rounded-xl mb-6"
                @dragover.prevent="dragOver = 'unclassified'"
                @dragleave="dragOver = null"
                @drop.prevent="onDrop('unclassified')"
-               :class="dragOver === 'unclassified' ? 'ring-2 ring-amber-400' : ''">
-            <p class="text-sm font-medium text-amber-800 mb-3">
-              <span x-text="flatUnclassified.length"></span> new brands to classify — drag them below
-            </p>
-            <div class="flex flex-wrap gap-2">
-              <template x-for="brand in flatUnclassified" :key="brand.brand_id">
-                <div draggable="true"
-                     @dragstart="onDragStart($event, brand, 'unclassified')"
-                     class="group inline-flex items-center gap-2 bg-white border border-amber-300 rounded-full px-3 py-1.5 text-xs font-medium text-charcoal-dark cursor-move hover:border-amber-400 hover:shadow-sm transition-all">
-                  <svg class="w-3 h-3 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8h16M4 16h16"/></svg>
-                  <span x-text="brand.name"></span>
-                </div>
-              </template>
+               :class="dragOver === 'unclassified' ? 'ring-2 ring-amber-400' : ''"
+               x-data="{ inboxExpanded: false }">
+            <!-- Header row: count + actions + chevron. Click toggles expand. -->
+            <div class="flex items-center gap-3 px-5 py-3 cursor-pointer hover:bg-amber-100/30 rounded-xl transition-colors"
+                 @click="inboxExpanded = !inboxExpanded">
+              <svg class="w-4 h-4 text-amber-700 shrink-0 transition-transform"
+                   :class="inboxExpanded ? 'rotate-90' : ''"
+                   fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+              </svg>
+              <div class="flex-1 min-w-0">
+                <p class="text-sm font-medium text-amber-800">
+                  <span x-text="flatUnclassified.length"></span> new brands detected
+                </p>
+                <p class="text-[11px] text-amber-700/80">
+                  Auto-extracted from AI responses. Most are noise — bulk-ignore or expand to triage.
+                </p>
+              </div>
+              <button @click.stop="bulkIgnoreUnclassified()"
+                      :disabled="bulkIgnoringUnclassified"
+                      class="shrink-0 text-xs px-3 py-1.5 rounded-md border border-amber-300 bg-white text-amber-800 hover:bg-amber-50 hover:border-amber-400 transition-colors disabled:opacity-50 disabled:cursor-wait font-medium">
+                <span x-show="!bulkIgnoringUnclassified">Mark all as ignored</span>
+                <span x-show="bulkIgnoringUnclassified">Ignoring…</span>
+              </button>
+            </div>
+            <!-- Pills (collapsed by default) -->
+            <div x-show="inboxExpanded" x-transition class="border-t border-amber-200 px-5 py-4">
+              <p class="text-[11px] text-amber-700 mb-3">Drag pills into My Brands, Competitors, or Ignored. Each pill is also a drop target if you need to nest under a parent.</p>
+              <div class="flex flex-wrap gap-2">
+                <template x-for="brand in flatUnclassified" :key="brand.brand_id">
+                  <div draggable="true"
+                       @dragstart="onDragStart($event, brand, 'unclassified')"
+                       class="group inline-flex items-center gap-2 bg-white border border-amber-300 rounded-full px-3 py-1.5 text-xs font-medium text-charcoal-dark cursor-move hover:border-amber-400 hover:shadow-sm transition-all">
+                    <svg class="w-3 h-3 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8h16M4 16h16"/></svg>
+                    <span x-text="brand.name"></span>
+                  </div>
+                </template>
+              </div>
             </div>
           </div>
         </template>
@@ -1140,17 +1168,93 @@ const isReviewing = effectiveView !== null && (
       </div>
     )}
 
-    <!-- Scanning in progress -->
+    <!-- Scanning in progress — transparent pipeline timeline.
+         Polls /api/scans/{id}/pipeline every 3 s. Each step shows its status
+         (done / running / pending), duration or elapsed time, and a heuristic
+         ETA. When all steps finish the parent page auto-reloads to Results
+         (status flip from `scanning` to `completed`). -->
     {!effectiveView && scan.status === 'scanning' && (
-      <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-8 text-center">
-        <h2 class="text-xl font-bold text-charcoal-dark mb-4">Scanning {scan.domain}</h2>
-        <div class="w-full bg-gray-200 rounded-full h-3 mb-4 max-w-md mx-auto">
-          <div class="bg-coral h-3 rounded-full transition-all" style={`width: ${scan.progress_pct || 0}%`}></div>
+      <div x-data={`scanPipeline('${id}')`} x-init="start()"
+           class="bg-white rounded-xl shadow-sm border border-gray-100 p-6 md:p-8">
+        <div class="flex items-start justify-between mb-5 gap-4">
+          <div>
+            <h2 class="text-xl font-bold text-charcoal-dark mb-1">Scanning {scan.domain}</h2>
+            <p class="text-sm text-charcoal-light">
+              <span x-text="summary.completed + ' of ' + summary.total + ' steps done'"></span>
+              <template x-if="summary.eta">
+                <span> · ETA <span x-text="summary.eta"></span></span>
+              </template>
+            </p>
+          </div>
+          <div class="text-right shrink-0">
+            <p class="text-2xl font-bold text-coral tabular-nums" x-text="overallPct + '%'"></p>
+            <p class="text-[10px] text-charcoal-light" x-text="'Elapsed ' + elapsedDisplay"></p>
+          </div>
         </div>
-        <p class="text-charcoal-dark font-medium mb-1">{scan.progress_pct || 0}%</p>
-        <p class="text-sm text-charcoal-light mb-4">{scan.progress_message || 'Running AI tests...'}</p>
-        <p class="text-xs text-charcoal-light">You can leave this page. We'll keep scanning.</p>
-        <meta http-equiv="refresh" content="3" />
+
+        <!-- Top-level progress bar -->
+        <div class="w-full bg-gray-100 rounded-full h-2 mb-6 overflow-hidden">
+          <div class="bg-coral h-2 rounded-full transition-all duration-500" :style="'width:' + overallPct + '%'"></div>
+        </div>
+
+        <!-- Step timeline -->
+        <ol class="space-y-3">
+          <template x-for="(step, idx) in steps" :key="step.job_type + idx">
+            <li class="flex items-start gap-3">
+              <!-- Status icon -->
+              <div class="shrink-0 mt-0.5">
+                <template x-if="step.status === 'completed'">
+                  <div class="w-5 h-5 rounded-full bg-emerald-100 flex items-center justify-center">
+                    <svg class="w-3 h-3 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
+                  </div>
+                </template>
+                <template x-if="step.status === 'running'">
+                  <div class="w-5 h-5 rounded-full bg-coral/20 flex items-center justify-center">
+                    <svg class="w-3 h-3 text-coral animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <circle cx="12" cy="12" r="10" stroke-width="3" stroke-dasharray="40 60" stroke-linecap="round"/>
+                    </svg>
+                  </div>
+                </template>
+                <template x-if="step.status === 'failed'">
+                  <div class="w-5 h-5 rounded-full bg-red-100 flex items-center justify-center">
+                    <svg class="w-3 h-3 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12"/></svg>
+                  </div>
+                </template>
+                <template x-if="step.status === 'pending' || step.status === 'queued'">
+                  <div class="w-5 h-5 rounded-full border-2 border-gray-200 bg-white"></div>
+                </template>
+              </div>
+              <!-- Step body -->
+              <div class="flex-1 min-w-0">
+                <div class="flex items-baseline justify-between gap-2">
+                  <p class="text-sm font-medium"
+                     :class="{
+                       'text-charcoal-dark': step.status === 'completed' || step.status === 'running',
+                       'text-charcoal-light': step.status === 'pending' || step.status === 'queued',
+                       'text-red-600': step.status === 'failed',
+                     }"
+                     x-text="step.label"></p>
+                  <p class="text-[11px] tabular-nums shrink-0"
+                     :class="step.status === 'running' ? 'text-coral font-medium' : 'text-charcoal-light'"
+                     x-text="formatStepTime(step)"></p>
+                </div>
+                <template x-if="step.details">
+                  <p class="text-[11px] text-charcoal-light mt-0.5" x-text="step.details"></p>
+                </template>
+                <template x-if="step.error">
+                  <p class="text-[11px] text-red-500 mt-0.5" x-text="step.error"></p>
+                </template>
+                <template x-if="step.status === 'failed' && step.attempts > 1">
+                  <p class="text-[10px] text-amber-600 mt-0.5" x-text="'Retried ' + step.attempts + ' times'"></p>
+                </template>
+              </div>
+            </li>
+          </template>
+        </ol>
+
+        <p class="text-[11px] text-charcoal-light text-center mt-6">
+          You can leave this page. We'll keep scanning.
+        </p>
       </div>
     )}
 
@@ -2242,6 +2346,108 @@ const isReviewing = effectiveView !== null && (
         },
       }));
 
+      // Pipeline timeline — polls /pipeline every 3 s and renders the per-step
+       // status. Auto-reloads the page when the scan flips to a terminal status
+       // (completed/failed) so the user lands on Results without F5.
+      window.Alpine.data('scanPipeline', (scanId) => ({
+        scanId,
+        steps: [],
+        scanStatus: 'scanning',
+        overallPct: 0,
+        summary: { completed: 0, total: 0, eta: '' },
+        elapsedMs: 0,
+        _pollTimer: null,
+        _clockTimer: null,
+
+        start() {
+          this.fetchPipeline();
+          this._pollTimer = setInterval(() => this.fetchPipeline(), 3000);
+          // Sub-second clock for the running step's elapsed counter — feels
+          // alive even between 3-second polls.
+          this._clockTimer = setInterval(() => {
+            for (const s of this.steps) {
+              if (s.status === 'running' && s.elapsed_ms != null) s.elapsed_ms += 1000;
+            }
+            this.elapsedMs += 1000;
+          }, 1000);
+        },
+
+        async fetchPipeline() {
+          try {
+            const res = await fetch('/api/scans/' + this.scanId + '/pipeline');
+            if (!res.ok) return;
+            const data = await res.json();
+            this.steps = data.steps || [];
+            this.scanStatus = data.scan_status;
+            this.elapsedMs = data.total_elapsed_ms || 0;
+            // Add the live elapsed of any running step to the running total
+            for (const s of this.steps) {
+              if (s.status === 'running' && s.elapsed_ms) this.elapsedMs += s.elapsed_ms;
+            }
+            this.summary = {
+              completed: data.completed_steps,
+              total: data.total_steps,
+              eta: this.formatDuration(data.remaining_eta_seconds * 1000),
+            };
+            // Compute overall pct from steps (completed = full weight, running = half).
+            // Pure-progress UX trick: each step contributes evenly, running adds 50%
+            // of its weight so we don't ever look stuck at integer percentages.
+            const total = Math.max(1, data.total_steps);
+            const done = data.completed_steps;
+            const partial = this.steps.filter(s => s.status === 'running').length * 0.5;
+            this.overallPct = Math.min(99, Math.round(((done + partial) / total) * 100));
+            if (data.scan_status === 'completed') {
+              this.overallPct = 100;
+              this._stopPolling();
+              setTimeout(() => window.location.reload(), 1200);
+            } else if (data.scan_status === 'failed') {
+              this._stopPolling();
+              setTimeout(() => window.location.reload(), 1500);
+            }
+          } catch (e) {
+            console.error('pipeline poll failed', e);
+          }
+        },
+
+        _stopPolling() {
+          if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+          if (this._clockTimer) { clearInterval(this._clockTimer); this._clockTimer = null; }
+        },
+
+        formatDuration(ms) {
+          if (!ms || ms < 0) return '';
+          const s = Math.round(ms / 1000);
+          if (s < 60) return s + 's';
+          const m = Math.floor(s / 60);
+          const r = s % 60;
+          if (m < 60) return r === 0 ? m + 'm' : m + 'm ' + r + 's';
+          const h = Math.floor(m / 60);
+          return h + 'h ' + (m % 60) + 'm';
+        },
+
+        formatStepTime(step) {
+          if (step.status === 'completed' && step.duration_ms != null) {
+            return this.formatDuration(step.duration_ms);
+          }
+          if (step.status === 'running') {
+            const elapsed = this.formatDuration(step.elapsed_ms);
+            const eta = step.eta_seconds ? ' · ETA ' + this.formatDuration(step.eta_seconds * 1000) : '';
+            return elapsed + eta;
+          }
+          if (step.status === 'pending' || step.status === 'queued') {
+            return step.eta_seconds ? '~' + this.formatDuration(step.eta_seconds * 1000) : '';
+          }
+          if (step.status === 'failed') {
+            return 'Failed';
+          }
+          return '';
+        },
+
+        get elapsedDisplay() {
+          return this.formatDuration(this.elapsedMs) || '0s';
+        },
+      }));
+
       window.Alpine.data('scanBrands', (initialData, scanId) => ({
         scanId: scanId,
         buckets: {
@@ -2470,6 +2676,48 @@ const isReviewing = effectiveView !== null && (
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ brand_id: brand.brand_id, classification: 'ignored' }),
           }).catch(e => console.error('Remove brand failed:', e));
+        },
+
+        // Bulk-ignore every brand currently sitting in the amber inbox.
+        // Mirrors what cleanup_brands does for noise items, but exposed as a
+        // user gesture for scans where cleanup_brands either failed or where
+        // the user wants instant triage without waiting for the LLM pass.
+        // Posts ONE call instead of N (avoids 2000+ classify POSTs).
+        bulkIgnoringUnclassified: false,
+        async bulkIgnoreUnclassified() {
+          if (this.bulkIgnoringUnclassified) return;
+          const items = [...this.flatUnclassified];
+          if (items.length === 0) return;
+          if (!confirm(`Mark ${items.length} brand${items.length > 1 ? 's' : ''} as ignored?\n\nThis moves them out of the inbox. You can still drag them back later.`)) return;
+          this.bulkIgnoringUnclassified = true;
+          // Optimistic: drain inbox + drop everything in Ignored
+          this.buckets.unclassified = [];
+          for (const b of items) {
+            b.children = []; // flat now — bulk ignore doesn't preserve nesting
+            this._insertIntoBucket('ignored', b);
+          }
+          try {
+            const res = await fetch(
+              '/api/scans/' + this.scanId + '/brands/bulk-classify',
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  brand_ids: items.map(b => b.brand_id),
+                  classification: 'ignored',
+                }),
+              },
+            );
+            if (!res.ok) {
+              const t = await res.text();
+              alert('Bulk ignore failed: ' + res.status + ' ' + t);
+            }
+          } catch (e) {
+            console.error('bulkIgnoreUnclassified failed:', e);
+            alert('Bulk ignore failed: ' + e.message);
+          } finally {
+            this.bulkIgnoringUnclassified = false;
+          }
         },
 
         // × on Ignored — really remove the brand from this scan (deletes the

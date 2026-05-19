@@ -577,6 +577,39 @@ def poll_and_execute():
             db.commit()
             logger.info(f"Job {job_obj.id} completed: {result}")
 
+            # End-of-chain status flip — `run_llm_tests` sets `scan.status` to
+            # 'completed' the moment its own LLM work finishes, but a retry of
+            # any downstream job (cleanup_brands, materialize_content_items, …)
+            # routes through `retry_scan` which sets the scan back to
+            # 'scanning'. Nothing then flips it back to 'completed' when those
+            # retried jobs succeed → the UI sticks on the Scan step forever.
+            # Fix: at the end of every successful job, if the scan is still
+            # 'scanning' and there are no pending/running/failed jobs left,
+            # promote it to 'completed' here.
+            if job_obj.scan_id:
+                try:
+                    from models import Scan as _Scan, Job as _Job
+                    scan_obj = db.query(_Scan).filter(_Scan.id == job_obj.scan_id).first()
+                    if scan_obj and scan_obj.status == "scanning":
+                        in_flight = db.query(_Job).filter(
+                            _Job.scan_id == job_obj.scan_id,
+                            _Job.status.in_(["pending", "running", "failed"]),
+                        ).count()
+                        if in_flight == 0:
+                            scan_obj.status = "completed"
+                            if not scan_obj.completed_at:
+                                scan_obj.completed_at = datetime.utcnow()
+                            scan_obj.updated_at = datetime.utcnow()
+                            db.commit()
+                            logger.info(
+                                f"Scan {scan_obj.id} flipped to completed "
+                                f"(end-of-chain after {job_obj.job_type})"
+                            )
+                except Exception:
+                    logger.exception(
+                        f"End-of-chain status flip failed for scan {job_obj.scan_id}"
+                    )
+
         except Exception as e:
             db.rollback()
             logger.exception(f"Job {job_obj.id} failed: {e}")
