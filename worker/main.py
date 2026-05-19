@@ -98,6 +98,7 @@ def load_handlers():
                           run_llm_tests, generate_editorial,
                           detect_competitors, generate_opportunities, cleanup_brands,
                           generate_domain_brief, generate_client_brief,
+                          generate_brand_brief,
                           generate_faq, generate_article,
                           materialize_content_items,
                           rematch_target_url, discover_trust_sources,
@@ -118,6 +119,7 @@ def load_handlers():
     HANDLERS["cleanup_brands"] = cleanup_brands.execute
     HANDLERS["generate_domain_brief"] = generate_domain_brief.execute
     HANDLERS["generate_client_brief"] = generate_client_brief.execute
+    HANDLERS["generate_brand_brief"] = generate_brand_brief.execute
     HANDLERS["generate_faq"] = generate_faq.execute
     HANDLERS["generate_article"] = generate_article.execute
     HANDLERS["materialize_content_items"] = materialize_content_items.execute
