@@ -229,6 +229,16 @@ if (clientId) {
                           :title="(b.children || []).length + ' gamme(s) auto-included in this brand\\'s mentions'"
                           x-text="(b.children || []).length + ' gamme' + ((b.children || []).length > 1 ? 's' : '')"></span>
                     <span x-show="i === 0" class="shrink-0 text-[9px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded bg-coral/10 text-coral">Lead</span>
+                    {/* Brief toggle — Phase BB per-brand brief, collapsed by default (Progressive Disclosure). */}
+                    <button type="button" @click.stop="toggleBriefPanel(b.id)"
+                            class="shrink-0 text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded border transition-colors"
+                            :class="isBriefExpanded(b.id) ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-white text-charcoal-light border-gray-200 hover:border-blue-300 hover:text-blue-600'"
+                            :title="isBriefExpanded(b.id) ? 'Hide brand brief panel' : 'Show brand brief (voice + audience + competitors specific to this brand)'">
+                      <span class="inline-flex items-center gap-1">
+                        <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                        Brief
+                      </span>
+                    </button>
                     <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                       <button type="button" @click.stop="moveUp(i)" :disabled="i === 0"
                               class="w-6 h-6 rounded text-charcoal-light hover:bg-gray-200 hover:text-charcoal-dark disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center"
@@ -267,6 +277,145 @@ if (clientId) {
                           </button>
                         </div>
                       </template>
+                    </div>
+                  </template>
+
+                  {/* Per-brand brief panel — Phase BB. Collapsed by default ;
+                       expands on Brief button click ; lazy-fetches on first open. */}
+                  <template x-if="isBriefExpanded(b.id)">
+                    <div x-transition class="ml-7 mt-2 mb-1 bg-blue-50/30 border border-blue-100 rounded-lg overflow-hidden">
+                      {/* Header — status badge + Generate + cap counter (Tesler / Doherty) */}
+                      <div class="px-3 py-2 border-b border-blue-100 flex items-center justify-between gap-2">
+                        <div class="flex items-center gap-2">
+                          <span class="text-[10px] uppercase tracking-wide font-semibold text-charcoal-dark">Brand brief</span>
+                          <template x-if="briefLoading[b.id]">
+                            <span class="text-[10px] text-charcoal-light italic">loading…</span>
+                          </template>
+                          <template x-if="!briefLoading[b.id] && !brandBriefs[b.id]?.brief">
+                            <span class="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-gray-100 text-charcoal-light">Not generated</span>
+                          </template>
+                          <template x-if="brandBriefs[b.id]?.brief && !brandBriefs[b.id]?.brief?.edited_by_user && !briefGenerating[b.id]">
+                            <span class="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-50 text-blue-700"
+                                  :title="'Auto-generated via ' + (brandBriefs[b.id]?.brief?.generated_via || 'unknown')">Ready</span>
+                          </template>
+                          <template x-if="brandBriefs[b.id]?.brief?.edited_by_user">
+                            <span class="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700"
+                                  title="You edited this — regeneration is blocked">Edited</span>
+                          </template>
+                          <template x-if="briefGenerating[b.id]">
+                            <span class="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 animate-pulse">Generating…</span>
+                          </template>
+                        </div>
+                        <div class="flex items-center gap-2">
+                          <template x-if="brandBriefs[b.id] && brandBriefs[b.id].generations_used > 0">
+                            <span class="text-[10px] tabular-nums"
+                                  :class="!brandBriefs[b.id].can_regenerate ? 'text-red-600 font-medium' : (brandBriefs[b.id].generations_cap - brandBriefs[b.id].generations_used <= 1 ? 'text-amber-700' : 'text-charcoal-light')"
+                                  :title="brandBriefs[b.id].generations_used + ' of ' + brandBriefs[b.id].generations_cap + ' brand-brief generations used'"
+                                  x-text="brandBriefs[b.id].generations_used + '/' + brandBriefs[b.id].generations_cap"></span>
+                          </template>
+                          <button type="button"
+                                  @click.stop="generateBrandBrief(b.id)"
+                                  :disabled="briefGenerating[b.id] || briefLoading[b.id] || (brandBriefs[b.id] && !brandBriefs[b.id].can_regenerate)"
+                                  :class="(briefGenerating[b.id] || briefLoading[b.id] || (brandBriefs[b.id] && !brandBriefs[b.id].can_regenerate)) ? 'opacity-50 cursor-not-allowed' : 'hover:bg-coral-dark'"
+                                  class="text-[10px] bg-coral text-white px-2.5 py-1 rounded font-medium transition-all"
+                                  :title="brandBriefs[b.id] && !brandBriefs[b.id].can_regenerate ? (brandBriefs[b.id]?.brief?.edited_by_user ? 'You edited this — clear edits to regen' : 'Regen cap reached for this brand') : 'Generate the per-brand brief (web-searched, ~10s, $0.02-0.05)'">
+                            <span x-show="!briefGenerating[b.id] && !brandBriefs[b.id]?.brief">Generate</span>
+                            <span x-show="!briefGenerating[b.id] && brandBriefs[b.id]?.brief && brandBriefs[b.id]?.can_regenerate">Regenerate</span>
+                            <span x-show="!briefGenerating[b.id] && brandBriefs[b.id]?.brief && !brandBriefs[b.id]?.can_regenerate">Capped</span>
+                            <span x-show="briefGenerating[b.id]">Generating…</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Body — read-only display when not editing, JSON editor when editing */}
+                      <div class="p-3 text-xs space-y-2">
+                        <template x-if="!brandBriefs[b.id]?.brief && !briefLoading[b.id] && !briefGenerating[b.id]">
+                          <p class="text-charcoal-light italic">
+                            No brand brief yet. Click Generate — uses this brand's name + workspace industry as input
+                            (OpenAI web_search primary, Gemini / Claude fallback). Surcharges the workspace brief for
+                            article + FAQ generation when this brand is in focus.
+                          </p>
+                        </template>
+
+                        {/* Read mode */}
+                        <template x-if="brandBriefs[b.id]?.brief && editingBrief[b.id] !== true">
+                          <div class="space-y-2">
+                            <template x-if="brandBriefs[b.id]?.brief?.description">
+                              <p><span class="text-[9px] uppercase tracking-wide font-semibold text-charcoal-light">Description</span><br/>
+                                <span class="text-charcoal-dark" x-text="brandBriefs[b.id]?.brief?.description"></span></p>
+                            </template>
+                            <template x-if="brandBriefs[b.id]?.brief?.parent_group">
+                              <p><span class="text-[9px] uppercase tracking-wide font-semibold text-charcoal-light">Parent group</span>
+                                <span class="text-charcoal-dark ml-1" x-text="brandBriefs[b.id]?.brief?.parent_group"></span></p>
+                            </template>
+                            <template x-if="brandBriefs[b.id]?.brief?.editorial_voice">
+                              <p><span class="text-[9px] uppercase tracking-wide font-semibold text-charcoal-light">Editorial voice</span><br/>
+                                <span class="text-charcoal-dark italic" x-text="brandBriefs[b.id]?.brief?.editorial_voice"></span></p>
+                            </template>
+                            <template x-if="brandBriefs[b.id]?.brief?.target_audience">
+                              <p><span class="text-[9px] uppercase tracking-wide font-semibold text-charcoal-light">Target audience</span><br/>
+                                <span class="text-charcoal-dark" x-text="brandBriefs[b.id]?.brief?.target_audience"></span></p>
+                            </template>
+                            <template x-if="brandBriefs[b.id]?.brief?.positioning_statement">
+                              <p><span class="text-[9px] uppercase tracking-wide font-semibold text-charcoal-light">Positioning</span><br/>
+                                <span class="text-charcoal-dark" x-text="brandBriefs[b.id]?.brief?.positioning_statement"></span></p>
+                            </template>
+                            <template x-if="(brandBriefs[b.id]?.brief?.differentiators || []).length > 0">
+                              <p><span class="text-[9px] uppercase tracking-wide font-semibold text-charcoal-light">Differentiators</span>
+                                <span class="text-charcoal-dark ml-1" x-text="(brandBriefs[b.id]?.brief?.differentiators || []).join(' · ')"></span></p>
+                            </template>
+                            <template x-if="(brandBriefs[b.id]?.brief?.direct_competitors || []).length > 0">
+                              <p><span class="text-[9px] uppercase tracking-wide font-semibold text-charcoal-light">Direct competitors</span>
+                                <span class="text-charcoal-dark ml-1" x-text="(brandBriefs[b.id]?.brief?.direct_competitors || []).map(c => c.name).join(' · ')"></span></p>
+                            </template>
+                            <template x-if="(brandBriefs[b.id]?.brief?.expertise_topics || []).length > 0">
+                              <p><span class="text-[9px] uppercase tracking-wide font-semibold text-charcoal-light">Expertise topics</span>
+                                <span class="text-charcoal-dark ml-1" x-text="(brandBriefs[b.id]?.brief?.expertise_topics || []).join(' · ')"></span></p>
+                            </template>
+                            <template x-if="(brandBriefs[b.id]?.brief?.regulatory_constraints || []).length > 0">
+                              <p><span class="text-[9px] uppercase tracking-wide font-semibold text-charcoal-light">Regulatory</span>
+                                <span class="text-charcoal-dark ml-1" x-text="(brandBriefs[b.id]?.brief?.regulatory_constraints || []).join(' · ')"></span></p>
+                            </template>
+                            <div class="flex items-center justify-between gap-2 pt-2 border-t border-blue-100/70">
+                              <span class="text-[10px] text-charcoal-light">
+                                <template x-if="brandBriefs[b.id]?.brief?.generated_via">
+                                  <span>Generated via <span x-text="brandBriefs[b.id]?.brief?.generated_via"></span>
+                                    <template x-if="brandBriefs[b.id]?.generated_at">
+                                      <span> · <span x-text="(brandBriefs[b.id]?.generated_at || '').slice(0, 16).replace('T', ' ')"></span></span>
+                                    </template>
+                                  </span>
+                                </template>
+                              </span>
+                              <button type="button" @click.stop="startEditBrief(b.id)"
+                                      class="text-[10px] text-charcoal-light hover:text-blue-700 underline">
+                                Edit (raw JSON)
+                              </button>
+                            </div>
+                          </div>
+                        </template>
+
+                        {/* Edit mode — JSON textarea (per-field inline edit deferred) */}
+                        <template x-if="editingBrief[b.id] === true">
+                          <div class="space-y-2">
+                            <p class="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                              Editing raw JSON. Saving marks the brief as user-edited (regeneration is blocked until you clear <code>edited_by_user</code>).
+                            </p>
+                            <textarea x-model="editBuffer[b.id]"
+                                      rows="14"
+                                      class="w-full text-[11px] font-mono text-charcoal-dark bg-white border border-gray-200 rounded p-2 outline-none focus:border-blue-400"></textarea>
+                            <div class="flex items-center justify-end gap-2">
+                              <button type="button" @click.stop="discardEditBrief(b.id)"
+                                      class="text-[10px] text-charcoal-light hover:text-charcoal-dark px-2 py-1">
+                                Discard
+                              </button>
+                              <button type="button" @click.stop="saveEditBrief(b.id)"
+                                      class="text-[10px] bg-coral text-white px-3 py-1 rounded font-medium hover:bg-coral-dark">
+                                Save changes
+                              </button>
+                            </div>
+                          </div>
+                        </template>
+                      </div>
                     </div>
                   </template>
                 </div>
@@ -373,6 +522,127 @@ if (clientId) {
             delete this.collapsedBrandIds[brandId];
           } else {
             this.collapsedBrandIds[brandId] = true;
+          }
+        },
+
+        // ── Phase BB per-brand brief state ──────────────────────────────
+        // expandedBriefIds[brandId] = true → panel open (collapsed by default
+        // for Progressive Disclosure). Briefs lazy-fetched on first expand
+        // to keep page load light.
+        expandedBriefIds: {},
+        brandBriefs: {},          // brandId → { brief, generations_used, generations_cap, can_regenerate, generated_at }
+        briefLoading: {},          // brandId → bool
+        briefGenerating: {},       // brandId → bool
+        editingBrief: {},          // brandId → bool
+        editBuffer: {},            // brandId → string (raw JSON being edited)
+        isBriefExpanded(brandId) {
+          return !!this.expandedBriefIds[brandId];
+        },
+        async toggleBriefPanel(brandId) {
+          if (this.expandedBriefIds[brandId]) {
+            delete this.expandedBriefIds[brandId];
+            return;
+          }
+          this.expandedBriefIds[brandId] = true;
+          if (this.brandBriefs[brandId] === undefined) {
+            await this._fetchBrandBrief(brandId);
+          }
+        },
+        async _fetchBrandBrief(brandId) {
+          this.briefLoading[brandId] = true;
+          try {
+            const res = await fetch(
+              `/api/clients/${this.clientId}/brands/${brandId}/brief`,
+              { credentials: 'include' }
+            );
+            if (res.ok) {
+              this.brandBriefs[brandId] = await res.json();
+            } else {
+              this.brandBriefs[brandId] = { brief: null, generations_used: 0,
+                                            generations_cap: 3, can_regenerate: true };
+            }
+          } catch (e) {
+            console.error('fetch brand brief failed', e);
+          } finally {
+            this.briefLoading[brandId] = false;
+          }
+        },
+        async generateBrandBrief(brandId) {
+          this.briefGenerating[brandId] = true;
+          try {
+            const res = await fetch(
+              `/api/clients/${this.clientId}/brands/${brandId}/brief/generate`,
+              { method: 'POST', credentials: 'include' }
+            );
+            if (!res.ok) {
+              let detail = '';
+              try {
+                const j = await res.json();
+                detail = (j && j.detail && (j.detail.message || j.detail)) ||
+                         j.message || JSON.stringify(j);
+              } catch (e) { detail = res.statusText; }
+              alert('Brand brief generation failed: ' + detail);
+              return;
+            }
+            // Poll the GET endpoint until the brief becomes non-null OR the
+            // generations_used counter bumps (Doherty's threshold ≤ 10s feels
+            // alive, so poll every 3s for up to ~2 min — generate_brand_brief
+            // typically completes in 15-60s).
+            const before = this.brandBriefs[brandId]?.generations_used || 0;
+            for (let i = 0; i < 40; i++) {
+              await new Promise(r => setTimeout(r, 3000));
+              const r2 = await fetch(
+                `/api/clients/${this.clientId}/brands/${brandId}/brief`,
+                { credentials: 'include' }
+              );
+              if (r2.ok) {
+                const data = await r2.json();
+                this.brandBriefs[brandId] = data;
+                if (data.brief && (data.generations_used > before)) return;
+              }
+            }
+          } catch (e) {
+            console.error('generate brand brief failed', e);
+          } finally {
+            this.briefGenerating[brandId] = false;
+          }
+        },
+        startEditBrief(brandId) {
+          const current = this.brandBriefs[brandId]?.brief || {};
+          this.editBuffer[brandId] = JSON.stringify(current, null, 2);
+          this.editingBrief[brandId] = true;
+        },
+        discardEditBrief(brandId) {
+          delete this.editingBrief[brandId];
+          delete this.editBuffer[brandId];
+        },
+        async saveEditBrief(brandId) {
+          let parsed;
+          try {
+            parsed = JSON.parse(this.editBuffer[brandId] || '{}');
+          } catch (e) {
+            alert('Invalid JSON: ' + e.message);
+            return;
+          }
+          try {
+            const res = await fetch(
+              `/api/clients/${this.clientId}/brands/${brandId}/brief`,
+              {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ brief: parsed }),
+              }
+            );
+            if (!res.ok) {
+              alert('Save failed: ' + res.statusText);
+              return;
+            }
+            // Re-fetch to pick up the edited_by_user flag + can_regenerate
+            await this._fetchBrandBrief(brandId);
+            this.discardEditBrief(brandId);
+          } catch (e) {
+            alert('Save failed: ' + e.message);
           }
         },
 

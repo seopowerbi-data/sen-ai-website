@@ -492,6 +492,134 @@ async def update_client_brief(client_id: str, req: BriefUpdate,
     return {"ok": True, "edited_by_user": new_brief.get("edited_by_user", True)}
 
 
+# ── Per-brand brief (client_brands.brief JSONB) ───────────────────────────
+# Phase BB — surcharges the workspace brief per-primary-brand. Same regen
+# cap pattern as the workspace brief but tighter ($0.05/run × N brands).
+# See worker/handlers/generate_brand_brief.py + project_phase_brand_briefs.md.
+
+MAX_BRAND_BRIEF_GENERATIONS = 3  # mirror worker/handlers/generate_brand_brief.py
+
+
+def _resolve_brand_for_client(client_id: str, brand_id: str, db: Session) -> ClientBrand:
+    try:
+        UUID(client_id); UUID(brand_id)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, "Invalid client_id or brand_id") from e
+    brand = (
+        db.query(ClientBrand)
+        .filter(ClientBrand.id == brand_id, ClientBrand.client_id == client_id)
+        .first()
+    )
+    if not brand:
+        raise HTTPException(404, "Brand not found in this client")
+    return brand
+
+
+@router.get("/{client_id}/brands/{brand_id}/brief")
+async def get_brand_brief(client_id: str, brand_id: str,
+                          user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """Return the per-brand brief + regen budget. ``brief`` is null when not generated yet."""
+    _check_client_access(client_id, user, db)
+    brand = _resolve_brand_for_client(client_id, brand_id, db)
+    used = int(brand.brief_generations_count or 0)
+    return {
+        "brief": brand.brief,
+        "brand_id": str(brand.id),
+        "brand_name": brand.name,
+        "generated_at": brand.brief_generated_at.isoformat() + "Z" if brand.brief_generated_at else None,
+        "generations_used": used,
+        "generations_cap": MAX_BRAND_BRIEF_GENERATIONS,
+        "can_regenerate": used < MAX_BRAND_BRIEF_GENERATIONS and not (brand.brief or {}).get("edited_by_user"),
+    }
+
+
+@router.post("/{client_id}/brands/{brand_id}/brief/generate")
+@limiter.limit("5/minute")
+async def generate_brand_brief(request: Request, client_id: str, brand_id: str,
+                               user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """Enqueue a generate_brand_brief worker job. Returns the job id for polling."""
+    _check_client_access(client_id, user, db)
+    brand = _resolve_brand_for_client(client_id, brand_id, db)
+
+    existing = brand.brief or {}
+    if existing.get("edited_by_user"):
+        raise HTTPException(
+            409,
+            "Brand brief has been manually edited — clear edited_by_user via PATCH before regenerating",
+        )
+
+    used = int(brand.brief_generations_count or 0)
+    if used >= MAX_BRAND_BRIEF_GENERATIONS:
+        raise HTTPException(429, {
+            "error": "brand_brief_regen_cap_reached",
+            "message": f"Brand brief regenerated {used} times "
+                       f"(max {MAX_BRAND_BRIEF_GENERATIONS}). Edit the brief manually below — "
+                       f"further regenerations are blocked.",
+            "generations_used": used,
+            "cap": MAX_BRAND_BRIEF_GENERATIONS,
+        })
+
+    # De-dup in-flight jobs for the same brand
+    in_flight = (
+        db.query(Job)
+        .filter(
+            Job.client_id == client_id,
+            Job.job_type == "generate_brand_brief",
+            Job.status.in_(["pending", "running"]),
+            # Job.payload JSONB filter — Postgres @> operator
+            Job.payload["brand_id"].astext == str(brand.id),
+        )
+        .first()
+    )
+    if in_flight:
+        return {"ok": True, "job_id": str(in_flight.id), "status": in_flight.status,
+                "message": "Already in flight",
+                "generations_used": used, "cap": MAX_BRAND_BRIEF_GENERATIONS}
+
+    job = Job(
+        client_id=client_id,
+        job_type="generate_brand_brief",
+        status="pending",
+        payload={"brand_id": str(brand.id)},
+        max_attempts=2,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return {"ok": True, "job_id": str(job.id), "status": "pending",
+            "generations_used": used, "cap": MAX_BRAND_BRIEF_GENERATIONS}
+
+
+class BrandBriefPatch(BaseModel):
+    brief: dict  # full brief object — Pydantic shape enforced at worker boundary
+
+
+@router.patch("/{client_id}/brands/{brand_id}/brief")
+async def update_brand_brief(client_id: str, brand_id: str, req: BrandBriefPatch,
+                             user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """Replace the per-brand brief with a manual edit (sets edited_by_user=true by default).
+
+    Pass an explicit ``edited_by_user: false`` inside ``brief`` to re-allow regeneration.
+    """
+    _check_client_access(client_id, user, db)
+    brand = _resolve_brand_for_client(client_id, brand_id, db)
+
+    new_brief = dict(req.brief)
+    # Default edited_by_user=true unless caller explicitly opts out (e.g., to clear flag)
+    if "edited_by_user" not in new_brief:
+        new_brief["edited_by_user"] = True
+    # Ensure name stays in sync with the row (in case user blanked it)
+    if not new_brief.get("name"):
+        new_brief["name"] = brand.name
+
+    brand.brief = new_brief
+    flag_modified(brand, "brief")
+    db.commit()
+    return {"ok": True,
+            "edited_by_user": new_brief.get("edited_by_user", True),
+            "brand_id": str(brand.id)}
+
+
 # ─── Trust sources (per-client authoritative reference domains) ──────────
 # Discovery is automatically chained from generate_client_brief on success,
 # but these endpoints expose manual control for: seeding existing clients
