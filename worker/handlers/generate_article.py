@@ -979,7 +979,25 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
     if item.scan and item.scan.client_id:
         client = db.query(Client).filter(Client.id == item.scan.client_id).first()
 
-    workspace_brief_text = format_workspace_brief(client.apps if client else None)
+    # Phase BB : surcharge workspace brief with the focus brand's per-brand
+    # brief (when set). focus_brand_id is established by Gate-2 validation
+    # (POST /scans/{id}/brands/validate). If not set, the brief stays
+    # workspace-only — backward compatible with pre-BB scans.
+    focus_brand_brief: dict | None = None
+    focus_brand_name: str | None = None
+    if item.scan and getattr(item.scan, "focus_brand_id", None):
+        fb = (
+            db.query(ClientBrand)
+            .filter(ClientBrand.id == item.scan.focus_brand_id)
+            .first()
+        )
+        if fb and fb.brief:
+            focus_brand_brief = fb.brief
+            focus_brand_name = fb.name
+    workspace_brief_text = format_workspace_brief(
+        client.apps if client else None,
+        focus_brand_brief,
+    )
     client_industry = ""
     client_voice = ""
     client_audience = ""
@@ -992,6 +1010,15 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
         # editorial voice on top of the media host's tone.
         client_voice = (client_brief.get("voice") or "").strip()
         client_audience = (client_brief.get("audience") or "").strip()
+    # Phase BB : brand brief overrides workspace voice / audience when set —
+    # the article wants the most specific signal. Brand wins per-field.
+    if focus_brand_brief:
+        bb_voice = (focus_brand_brief.get("editorial_voice") or "").strip()
+        bb_audience = (focus_brand_brief.get("target_audience") or "").strip()
+        if bb_voice:
+            client_voice = bb_voice
+        if bb_audience:
+            client_audience = bb_audience
 
     promoted_brand_ids: list = []
     promoted_brand_names: list[str] = []
