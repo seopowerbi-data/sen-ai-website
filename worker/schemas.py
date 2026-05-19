@@ -236,6 +236,54 @@ class PersonaGenerated(BaseModel):
         return v
 
 
+# ─── LLM-as-judge per-response judgment (Sprint J) ──────────────────────────
+
+
+CitationQuality = Literal["lead", "alternative", "footnote", "absent"]
+
+
+class QuestionJudgmentEntry(BaseModel):
+    """One judgment entry inside the judge's batched JSON output.
+
+    The judge processes N (question, response) pairs per Haiku call and
+    emits one entry per pair, keyed by the integer index passed in the prompt.
+    Stored in scan_question_judgments (migration 037).
+
+    Foot-gun #3 enforcement (intent_addressed requires evidence span) lives
+    in the handler — Pydantic accepts the raw LLM output, the handler resets
+    the bool to false if evidence is empty.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    idx: int = Field(ge=0, description="0-based index matching the prompt batch")
+    positive_signal_hit: bool = False
+    positive_signal_evidence: str = ""
+    negative_signal_hit: bool = False
+    negative_signal_evidence: str = ""
+    intent_addressed: bool = False
+    intent_evidence: str = ""
+    citation_quality: CitationQuality | None = None
+    enveloppement_score: int | None = Field(default=None, ge=0, le=5)
+
+    @field_validator(
+        "positive_signal_evidence",
+        "negative_signal_evidence",
+        "intent_evidence",
+    )
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return (v or "").strip()
+
+    @field_validator("citation_quality", mode="before")
+    @classmethod
+    def _normalize_quality(cls, v):
+        if not v or not isinstance(v, str):
+            return None
+        v = v.strip().lower()
+        return v if v in ("lead", "alternative", "footnote", "absent") else None
+
+
 # ─── domain brief (OpenAI Responses API + web_search) ───────────────────────
 
 class CompetitorInBrief(BaseModel):

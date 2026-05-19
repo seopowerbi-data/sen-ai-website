@@ -588,6 +588,44 @@ class ScanLLMResult(Base):
     web_search_queries = Column(JSONB, nullable=False, default=list)
 
 
+class ScanQuestionJudgment(Base):
+    """Sprint J (migration 037) — LLM-as-judge per-response signals.
+
+    One row per (question, provider) i.e. per ScanLLMResult. Reads each
+    response against scan_questions.signal_positif/signal_negatif/intention_cachee
+    via Haiku and emits structured bools + evidence spans.
+    See project_phase_judge_and_entities.md.
+    PARITÉ obligatoire avec worker/models.py (foot-gun #18).
+    """
+    __tablename__ = "scan_question_judgments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    scan_llm_result_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("scan_llm_results.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False)
+    question_id = Column(UUID(as_uuid=True), ForeignKey("scan_questions.id", ondelete="SET NULL"))
+
+    positive_signal_hit = Column(Boolean, nullable=False)
+    positive_signal_evidence = Column(Text)
+    negative_signal_hit = Column(Boolean, nullable=False)
+    negative_signal_evidence = Column(Text)
+    intent_addressed = Column(Boolean, nullable=False)
+    intent_evidence = Column(Text)
+
+    citation_quality = Column(String(20))     # lead/alternative/footnote/absent
+    enveloppement_score = Column(Integer)      # 0-5 RAPP Positivity, NULL if not scorable
+
+    judge_model = Column(String(80))
+    input_tokens = Column(Integer)
+    output_tokens = Column(Integer)
+    duration_ms = Column(Integer)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class ScanOpportunity(Base):
     __tablename__ = "scan_opportunities"
 

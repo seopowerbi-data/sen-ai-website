@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     model_scan_test_gemini: str = "gemini-2.5-flash"
     model_brand_analyzer: str = "gemini-2.5-flash-lite"
     model_classify_question_intent: str = "claude-haiku-4-5-20251001"
+    model_judge_question_responses: str = "claude-haiku-4-5-20251001"
 
     @property
     def task_models(self) -> dict[str, str]:
@@ -57,6 +58,7 @@ class Settings(BaseSettings):
             "scan_test_gemini": self.model_scan_test_gemini,
             "brand_analyzer": self.model_brand_analyzer,
             "classify_question_intent": self.model_classify_question_intent,
+            "judge_question_responses": self.model_judge_question_responses,
         }
 
     # extra='ignore' lets services own their own env vars without forcing every

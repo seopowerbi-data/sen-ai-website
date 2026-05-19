@@ -192,6 +192,17 @@ def execute(job_payload: dict, scan_id: str | None, db: Session) -> dict:
             f"competitor_domains_count={len(result.get('competitor_domains') or {})}"
         )
 
+    # Sprint J: enqueue a judge job so the new responses get scored against
+    # the per-question grille. Idempotent — the handler skips already-judged
+    # rows, so this is safe even if a previous refresh already enqueued one
+    # that's still pending. Without this hook, T+14 measurement-loop refreshes
+    # would leave the post-publish responses unjudged (memo foot-gun #9).
+    # Use scan.id (resolved from item.scan_id) — the handler's scan_id param
+    # is None for refresh jobs which are tied to a content_item, not a scan.
+    if inserted:
+        from models import Job as JobModel
+        db.add(JobModel(scan_id=scan.id, job_type="judge_question_responses"))
+
     db.commit()
 
     return {

@@ -448,11 +448,14 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
         "refund_info": refund_info,
     }
 
-    # Chain: classify intent (Phase B Tier A) → opportunities + editorial
-    # + cleanup brands. Worker poll is FIFO single-thread, so
-    # classify_question_intent runs first and populates intent_category
-    # before generate_opportunities reads it.
+    # Chain: classify intent (Phase B Tier A) → judge per-question signals
+    # (Sprint J) → opportunities + editorial + cleanup brands. Worker poll
+    # is FIFO single-thread, so classify_question_intent runs first and
+    # populates intent_category before generate_opportunities reads it.
+    # judge_question_responses can run in any order vs opportunities since
+    # it doesn't currently feed back into scoring (Sprint M will wire that).
     db.add(JobModel(scan_id=scan_id, job_type="classify_question_intent"))
+    db.add(JobModel(scan_id=scan_id, job_type="judge_question_responses"))
     db.add(JobModel(scan_id=scan_id, job_type="generate_opportunities"))
     db.add(JobModel(scan_id=scan_id, job_type="generate_editorial"))
     db.add(JobModel(scan_id=scan_id, job_type="cleanup_brands"))

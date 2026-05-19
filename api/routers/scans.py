@@ -8,6 +8,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import joinedload
 from models import (
     Scan, ScanKeyword, ScanTopic, ScanPersona, ScanQuestion, ScanLLMResult,
+    ScanQuestionJudgment,
     ScanBrandClassification, ScanBrandTopic, ScanOpportunity, ClientBrand,
     Job, UserClient, get_db,
 )
@@ -1804,6 +1805,15 @@ async def get_results(scan_id: str, provider: str | None = Query(None), user=Dep
             if pq.get("question") and pq.get("intention_cachee"):
                 intent_lookup[pq["question"].strip().lower()] = pq["intention_cachee"]
 
+    # Sprint J: fetch judgments for these llm_results in one query (avoid N+1).
+    # Indexed by scan_llm_result_id ; UI uses these to render Pos/Neg chips.
+    judgments_by_result_id = {
+        str(j.scan_llm_result_id): j
+        for j in db.query(ScanQuestionJudgment).filter(
+            ScanQuestionJudgment.scan_id == scan_id
+        ).all()
+    }
+
     details = []
     for r in results:
         q = db.query(ScanQuestion).filter(ScanQuestion.id == r.question_id).first()
@@ -1813,6 +1823,7 @@ async def get_results(scan_id: str, provider: str | None = Query(None), user=Dep
         if q:
             intention = q.intention_cachee or intent_lookup.get((q.question or "").strip().lower())
         bm_mentioned = (r.brand_analysis or {}).get("marque_cible_mentionnee", False)
+        j = judgments_by_result_id.get(str(r.id))
         details.append({
             "question": q.question if q else "?",
             "type": q.type_question if q else "?",
@@ -1837,6 +1848,17 @@ async def get_results(scan_id: str, provider: str | None = Query(None), user=Dep
             "brand_analysis": r.brand_analysis or {},
             "response_text": r.response_text or "",
             "duration_ms": r.duration_ms,
+            # Sprint J judgment payload — None when not yet judged.
+            "judgment": None if j is None else {
+                "positive_signal_hit": j.positive_signal_hit,
+                "positive_signal_evidence": j.positive_signal_evidence or "",
+                "negative_signal_hit": j.negative_signal_hit,
+                "negative_signal_evidence": j.negative_signal_evidence or "",
+                "intent_addressed": j.intent_addressed,
+                "intent_evidence": j.intent_evidence or "",
+                "citation_quality": j.citation_quality,
+                "enveloppement_score": j.enveloppement_score,
+            },
         })
 
     # Focus brand name
