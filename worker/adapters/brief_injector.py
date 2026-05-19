@@ -249,7 +249,8 @@ def format_vertical_examples(scan_config: dict | None) -> str:
     return "\n".join(lines)
 
 
-def format_analysis_context(scan_config: dict | None, client_apps: dict | None) -> str:
+def format_analysis_context(scan_config: dict | None, client_apps: dict | None,
+                            brand_brief: dict | None = None) -> str:
     """Combine domain brief + workspace brief + vertical examples for analysis prompts.
 
     Analysers (classify_topics, generate_personas, brand_analyzer, brand_cleanup,
@@ -259,13 +260,18 @@ def format_analysis_context(scan_config: dict | None, client_apps: dict | None) 
       3. Vertical examples — concrete valid/noise patterns for this industry,
          so the LLM stops over-extracting ingredients/generics as brands.
 
+    Phase BB : optional ``brand_brief`` threads through to format_workspace_brief
+    to surcharge the workspace block with focus-brand specifics (voice, audience,
+    competitors, expertise topics). Currently only ``generate_personas`` passes
+    it ; other analysers see the legacy workspace-only block.
+
     Returns "" if all three are empty. Blocks are separated by blank lines.
     """
     parts: list[str] = []
     db_block = format_brief_context(scan_config)
     if db_block:
         parts.append(db_block)
-    wb_block = format_workspace_brief(client_apps)
+    wb_block = format_workspace_brief(client_apps, brand_brief)
     if wb_block:
         parts.append(wb_block)
     ve_block = format_vertical_examples(scan_config)

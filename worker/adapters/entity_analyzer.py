@@ -596,6 +596,20 @@ def build_target_entities_from_scan(
                 target_domains.append(focus.domain)
             target_products.extend(focus.product_lines or [])
 
+            # Phase BB : enrich products with the focus brand's BrandBrief
+            # hero_products + signature_features. Capped at 10 each so brands
+            # with sprawling catalogs (Avène has 30+ signature ingredients)
+            # don't blow up the prompt token budget — same cap pattern as
+            # known_entities below. Foot-gun #10 in project_phase_brand_briefs.
+            brand_brief = focus.brief or {}
+            if isinstance(brand_brief, dict):
+                hero = [p for p in (brand_brief.get("hero_products") or [])
+                        if isinstance(p, str) and p.strip()][:10]
+                features = [f for f in (brand_brief.get("signature_features") or [])
+                            if isinstance(f, str) and f.strip()][:10]
+                target_products.extend(hero)
+                target_products.extend(features)
+
             # Children = ranges/gammes (direct descendants in the brand tree)
             children = db.query(ClientBrand).filter(
                 ClientBrand.parent_id == focus.id

@@ -67,14 +67,26 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     db.commit()
 
     from adapters.brief_injector import format_analysis_context
-    from models import Client as _Client
+    from models import Client as _Client, ClientBrand as _ClientBrand
     _client = db.query(_Client).filter(_Client.id == scan.client_id).first()
+    # Phase BB : when scan has a focus brand with a generated BrandBrief,
+    # personas inherit brand-specific target_audience + audience_segments
+    # via format_analysis_context → format_workspace_brief 2-level merge.
+    _focus_brief: dict | None = None
+    if scan.focus_brand_id:
+        _fb = db.query(_ClientBrand).filter(_ClientBrand.id == scan.focus_brand_id).first()
+        if _fb and _fb.brief:
+            _focus_brief = _fb.brief
     result = asyncio.run(generate_all_topics(
         domain=scan.domain,
         topics_with_keywords=topics_with_keywords,
         nb_personas=nb_personas,
         anthropic_api_key=settings.anthropic_api_key,
-        domain_context=format_analysis_context(scan.config, _client.apps if _client else None),
+        domain_context=format_analysis_context(
+            scan.config,
+            _client.apps if _client else None,
+            _focus_brief,
+        ),
     ))
 
     # Log LLM usage for cost monitoring (aggregate across all topic calls)
