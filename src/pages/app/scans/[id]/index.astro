@@ -895,9 +895,13 @@ const isReviewing = effectiveView !== null && (
             <div class="space-y-2">
               <template x-for="brand in buckets.my_brand" :key="brand.brand_id">
                 <div>
-                  <!-- Parent brand row (can be focus) -->
+                  <!-- Parent brand row (can be focus, accepts drag-to-parent drops) -->
                   <div draggable="true"
                        @dragstart="onDragStart($event, brand, 'my_brand')"
+                       @dragover.prevent.stop="dragged && dragged.brand_id !== brand.brand_id && draggedFrom === 'my_brand' ? dragOverParent = brand.brand_id : null"
+                       @dragleave.stop="dragOverParent === brand.brand_id ? dragOverParent = null : null"
+                       @drop.prevent.stop="onDropOnParent($event, brand, 'my_brand')"
+                       :class="dragOverParent === brand.brand_id ? 'ring-2 ring-emerald-500 bg-emerald-100/60' : ''"
                        class="group flex items-center gap-2 bg-emerald-50/40 border border-emerald-100 rounded-lg px-3 py-2 cursor-move hover:border-emerald-300 hover:shadow-sm transition-all">
                     <!-- Focus star toggle (roots only) -->
                     <button @click.stop="toggleFocus(brand)"
@@ -987,9 +991,13 @@ const isReviewing = effectiveView !== null && (
             <div class="space-y-2">
               <template x-for="brand in buckets.competitor" :key="brand.brand_id">
                 <div>
-                  <!-- Parent -->
+                  <!-- Parent (accepts drag-to-parent drops from same bucket) -->
                   <div draggable="true"
                        @dragstart="onDragStart($event, brand, 'competitor')"
+                       @dragover.prevent.stop="dragged && dragged.brand_id !== brand.brand_id && draggedFrom === 'competitor' ? dragOverParent = brand.brand_id : null"
+                       @dragleave.stop="dragOverParent === brand.brand_id ? dragOverParent = null : null"
+                       @drop.prevent.stop="onDropOnParent($event, brand, 'competitor')"
+                       :class="dragOverParent === brand.brand_id ? 'ring-2 ring-red-500 bg-red-100/60' : ''"
                        class="group flex items-center gap-2 bg-red-50/30 border border-red-100 rounded-lg px-3 py-2 cursor-move hover:border-red-300 hover:shadow-sm transition-all">
                     <button x-show="brand.children && brand.children.length > 0"
                             @click.stop="toggleBrandExpand(brand.brand_id)"
@@ -2378,6 +2386,83 @@ const isReviewing = effectiveView !== null && (
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ brand_id: brand.brand_id, classification: 'ignored' }),
           }).catch(e => console.error('Remove brand failed:', e));
+        },
+
+        // × on Ignored — really remove the brand from this scan (deletes the
+        // per-scan classification row). The client_brands row stays so future
+        // scans / other workspaces aren't affected.
+        async deleteBrandFromScan(brand, fromBucket) {
+          this._removeFromBucket(fromBucket, brand.brand_id);
+          try {
+            const res = await fetch(
+              '/api/scans/' + this.scanId + '/brands/' + brand.brand_id,
+              { method: 'DELETE' },
+            );
+            if (!res.ok) {
+              const t = await res.text();
+              alert('Could not remove brand: ' + res.status + ' ' + t);
+              // Best-effort re-insert so the UI doesn't lie about the state
+              this._insertIntoBucket(fromBucket, brand);
+            }
+          } catch (e) {
+            console.error('deleteBrandFromScan failed:', e);
+            this._insertIntoBucket(fromBucket, brand);
+          }
+        },
+
+        // Drag-to-parent — when a brand is dropped onto a root row in the same
+        // bucket, nest it under that root. The hierarchy lives on
+        // client_brands.parent_id (client-scoped), so the change applies to
+        // every scan in the workspace — that's the intended behaviour, the
+        // brand catalogue is canonical.
+        dragOverParent: null,  // brand_id of the parent the cursor is hovering
+        async reparentBrand(brand, targetParent, bucket) {
+          if (!brand || !targetParent) return;
+          if (brand.brand_id === targetParent.brand_id) return;
+          // Optimistic UI: detach from current location, nest under target
+          const moved = this._removeFromBucket(bucket, brand.brand_id) || { ...brand };
+          moved.parent_id = targetParent.brand_id;
+          // Drop any focus / children — children of children isn't supported
+          moved.is_focus = false;
+          moved.children = [];
+          if (!targetParent.children) targetParent.children = [];
+          targetParent.children.push(moved);
+          try {
+            const res = await fetch(
+              '/api/scans/' + this.scanId + '/brands/' + brand.brand_id + '/parent',
+              {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ parent_id: targetParent.brand_id }),
+              },
+            );
+            if (!res.ok) {
+              const t = await res.text();
+              alert('Could not reparent: ' + res.status + ' ' + t);
+              // Roll back: pop the optimistic child and put back at root
+              const idx = targetParent.children.findIndex(c => c.brand_id === moved.brand_id);
+              if (idx >= 0) targetParent.children.splice(idx, 1);
+              moved.parent_id = null;
+              this._insertIntoBucket(bucket, moved);
+            }
+          } catch (e) {
+            console.error('reparent failed:', e);
+          }
+        },
+
+        // Used by the @drop on a parent row: extract the dragged brand from
+        // dataTransfer + current state and ask reparentBrand to nest it.
+        onDropOnParent(event, targetParent, bucket) {
+          this.dragOverParent = null;
+          const brand = this.dragged;
+          const fromBucket = this.draggedFrom;
+          this.dragged = null;
+          this.draggedFrom = null;
+          if (!brand || !targetParent) return;
+          // Same-bucket only — cross-bucket reparent isn't supported (backend
+          // rejects it with 400 anyway, the early return keeps UX honest).
+          if (fromBucket !== bucket) return;
+          this.reparentBrand(brand, targetParent, bucket);
         },
 
         // Idempotent re-sync against the current Domain Brief. The first
