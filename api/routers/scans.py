@@ -1198,6 +1198,40 @@ async def validate_scan_brands(scan_id: str, user=Depends(get_current_user), db:
     scan.status = "generating_personas"
     scan.updated_at = datetime.utcnow()
     _create_job(db, scan_id, "generate_personas")
+
+    # Phase BB sync : enqueue generate_brand_brief for the focus brand in
+    # parallel with generate_personas, so the brief lands in time for the
+    # first generate_article / generate_faq downstream (typically minutes
+    # later — personas + run_llm_tests take 10-30 min). Idempotent —
+    # handler checks brand.brief IS NULL and the cap before regen.
+    focus_brand = db.query(ClientBrand).filter(
+        ClientBrand.id == scan.focus_brand_id
+    ).first()
+    if focus_brand and focus_brand.brief is None and \
+            int(focus_brand.brief_generations_count or 0) < 3:
+        in_flight_bb = (
+            db.query(Job)
+            .filter(
+                Job.client_id == scan.client_id,
+                Job.job_type == "generate_brand_brief",
+                Job.status.in_(["pending", "running"]),
+                Job.payload["brand_id"].astext == str(focus_brand.id),
+            )
+            .first()
+        )
+        if not in_flight_bb:
+            db.add(Job(
+                client_id=scan.client_id,
+                job_type="generate_brand_brief",
+                status="pending",
+                payload={"brand_id": str(focus_brand.id)},
+                max_attempts=2,
+            ))
+            logger.info(
+                f"validate_brands: enqueued generate_brand_brief for focus "
+                f"brand {focus_brand.id} ({focus_brand.name})"
+            )
+
     db.commit()
     return {"status": "generating_personas", "my_brand_count": my_brand_count}
 

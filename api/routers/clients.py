@@ -358,6 +358,45 @@ async def update_client_promotion(client_id: str, req: PromotionUpdate,
                 sbc.updated_at = datetime.utcnow()
                 flipped += 1
 
+    # Phase BB sync : when a brand is added to primary_brand_ids and has no
+    # brief yet, auto-enqueue generate_brand_brief. Idempotent — the worker
+    # handler checks `brand.brief IS NULL` before regenerating, and the API
+    # endpoint hard-caps regens. Failure here is best-effort (rollback the
+    # job insert but keep the primary_brand_ids change).
+    enqueued = 0
+    if added:
+        try:
+            for bid_str in added:
+                bid_uuid = UUID(bid_str)
+                brand = db.query(ClientBrand).filter(ClientBrand.id == bid_uuid).first()
+                if brand and (brand.brief is None) and \
+                        (int(brand.brief_generations_count or 0) < MAX_BRAND_BRIEF_GENERATIONS):
+                    # De-dup against in-flight jobs for the same brand
+                    in_flight = (
+                        db.query(Job)
+                        .filter(
+                            Job.client_id == client_id,
+                            Job.job_type == "generate_brand_brief",
+                            Job.status.in_(["pending", "running"]),
+                            Job.payload["brand_id"].astext == bid_str,
+                        )
+                        .first()
+                    )
+                    if in_flight:
+                        continue
+                    db.add(Job(
+                        client_id=UUID(client_id),
+                        job_type="generate_brand_brief",
+                        status="pending",
+                        payload={"brand_id": bid_str},
+                        max_attempts=2,
+                    ))
+                    enqueued += 1
+            if enqueued:
+                db.commit()
+        except Exception:
+            db.rollback()
+
     db.commit()
 
     return {
@@ -365,6 +404,7 @@ async def update_client_promotion(client_id: str, req: PromotionUpdate,
         "primary_brand_ids": req.primary_brand_ids,
         "count": len(req.primary_brand_ids),
         "competitor_to_my_brand_flipped": flipped,
+        "brand_briefs_enqueued": enqueued,
     }
 
 

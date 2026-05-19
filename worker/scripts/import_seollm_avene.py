@@ -191,6 +191,27 @@ def main():
     )
     db.add(job)
 
+    # Phase BB sync : enqueue generate_brand_brief for each primary brand
+    # in this client that hasn't been briefed yet. Pre-seeds the per-brand
+    # briefs at import time so the first generated article inherits them
+    # without the user having to click Generate on each brand row.
+    from models import Client as _ClientModel, ClientBrand as _ClientBrand
+    _client = db.query(_ClientModel).filter(_ClientModel.id == scan.client_id).first()
+    bb_enqueued = 0
+    if _client and _client.primary_brand_ids:
+        for bid in _client.primary_brand_ids:
+            brand = db.query(_ClientBrand).filter(_ClientBrand.id == bid).first()
+            if brand and brand.brief is None and \
+                    int(brand.brief_generations_count or 0) < 3:
+                db.add(Job(
+                    client_id=scan.client_id,
+                    job_type="generate_brand_brief",
+                    status="queued",
+                    payload={"brand_id": str(brand.id)},
+                    max_attempts=2,
+                ))
+                bb_enqueued += 1
+
     db.commit()
 
     print(f"\n=========================")
@@ -200,6 +221,7 @@ def main():
     print(f"  questions inserted: {total_questions}")
     print(f"  questions skipped (<10 chars): {skipped_questions}")
     print(f"  classify_question_intent job enqueued: {job.id}")
+    print(f"  generate_brand_brief jobs enqueued: {bb_enqueued}")
     print(f"=========================")
     return 0
 
