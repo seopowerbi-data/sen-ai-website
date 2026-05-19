@@ -2764,6 +2764,17 @@ const isReviewing = effectiveView !== null && (
               );
             }
           }
+          // Sync topic-level is_active so the Topics page reflects the change.
+          // Without this, disabling all personas here leaves the topic toggle
+          // ON in Gate 1 — the two pages would silently disagree.
+          updates.push(
+            fetch('/api/scans/' + this.scanId + '/topics/' + topic.topic_id, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ is_active: targetState }),
+            })
+          );
+          topic.is_active = targetState;
           this._recomputeStats();
           try {
             const results = await Promise.all(updates);
