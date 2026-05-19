@@ -1,4 +1,6 @@
+import logging
 from datetime import datetime
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -10,8 +12,11 @@ from models import (
     Scan, ScanKeyword, ScanTopic, ScanPersona, ScanQuestion, ScanLLMResult,
     ScanQuestionJudgment,
     ScanBrandClassification, ScanBrandTopic, ScanOpportunity, ClientBrand,
+    Client,
     Job, UserClient, get_db,
 )
+
+logger = logging.getLogger(__name__)
 from services.auth_service import get_current_user
 from services.audit import audit_log
 from services.rate_limit import limiter
@@ -105,6 +110,14 @@ class BrandReparent(BaseModel):
     parent_id=None ⇒ promote to root.
     """
     parent_id: str | None = None
+
+
+class BrandBulkClassify(BaseModel):
+    """Bulk classify N brands at once (one DB pass instead of N PATCHes).
+    Used by the "Mark all as ignored" button in the amber inbox post-scan.
+    """
+    brand_ids: list[str]
+    classification: str  # my_brand | competitor | ignored | unclassified
 
 
 class ScanResponse(BaseModel):
@@ -663,6 +676,76 @@ async def classify_scan_brand(scan_id: str, req: BrandClassify, user=Depends(get
     }
 
 
+@router.post("/{scan_id}/brands/bulk-classify")
+async def bulk_classify_brands(scan_id: str, req: BrandBulkClassify, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """Set classification on N brands at once.
+
+    Used by the "Mark all as ignored" inbox shortcut — N≈2000 individual
+    PATCH calls would burn 30s+ of round-trips, and cleanup_brands often
+    fails on dense scans anyway. This is the manual escape hatch.
+
+    Never touches focus brands or brands already classified as my_brand
+    (avoids accidental demotion if the user mis-selects).
+    """
+    scan = _check_scan_access(scan_id, user, db)
+
+    if req.classification not in ("my_brand", "competitor", "ignored", "unclassified"):
+        raise HTTPException(400, "classification must be my_brand | competitor | ignored | unclassified")
+    if not req.brand_ids:
+        return {"updated": 0, "inserted": 0, "skipped_my_brand": 0}
+
+    # Ensure all brand_ids belong to this scan's client (security boundary)
+    valid_brand_ids = {
+        str(bid) for (bid,) in db.query(ClientBrand.id).filter(
+            ClientBrand.id.in_(req.brand_ids),
+            ClientBrand.client_id == scan.client_id,
+        ).all()
+    }
+    if not valid_brand_ids:
+        return {"updated": 0, "inserted": 0, "skipped_my_brand": 0}
+
+    # Read existing SBC rows in one query
+    existing = {
+        str(s.brand_id): s for s in db.query(ScanBrandClassification).filter(
+            ScanBrandClassification.scan_id == scan_id,
+            ScanBrandClassification.brand_id.in_(valid_brand_ids),
+        ).all()
+    }
+
+    updated = inserted = skipped_my_brand = 0
+    for bid in valid_brand_ids:
+        sbc = existing.get(bid)
+        if sbc is None:
+            db.add(ScanBrandClassification(
+                scan_id=scan_id,
+                brand_id=bid,
+                classification=req.classification,
+                is_focus=False,
+                classified_by="user_bulk",
+                source="user_bulk",
+            ))
+            inserted += 1
+        else:
+            # Protect my_brand + focus from accidental bulk overrides.
+            if sbc.classification == "my_brand" or sbc.is_focus:
+                skipped_my_brand += 1
+                continue
+            if sbc.classification != req.classification:
+                sbc.classification = req.classification
+                sbc.classified_by = "user_bulk"
+                sbc.source = "user_bulk"
+                sbc.updated_at = datetime.utcnow()
+                updated += 1
+
+    scan.updated_at = datetime.utcnow()
+    db.commit()
+    return {
+        "updated": updated,
+        "inserted": inserted,
+        "skipped_my_brand": skipped_my_brand,
+    }
+
+
 @router.delete("/{scan_id}/brands/{brand_id}")
 async def remove_brand_from_scan(scan_id: str, brand_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
     """Remove the brand from this scan's view.
@@ -952,6 +1035,26 @@ async def validate_scan_brands(scan_id: str, user=Depends(get_current_user), db:
     ).first()
     if not focus_sbc or focus_sbc.classification != "my_brand" or not focus_sbc.is_focus:
         raise HTTPException(400, "Focus brand row is inconsistent — reclassify it as my_brand with is_focus=true")
+
+    # Sync Gate 2 → workspace primaries (companion to the inverse sweep in
+    # routers/clients.update_client_promotion). The focus brand the user just
+    # validated on this scan is logically a my-brand at the workspace level
+    # too — without this, Settings → My Primary Brands stays empty after the
+    # user finishes Gate 2 (e.g. imported the seo-llm Avène cache then
+    # validated focus=Eau Thermale Avène) and content gen falls back to
+    # PromotionUnsetError. Additive only : we don't strip primaries that
+    # aren't on this scan, and we don't reorder.
+    client = db.query(Client).filter(Client.id == scan.client_id).first()
+    if client:
+        existing = [str(b) for b in (client.primary_brand_ids or [])]
+        if str(scan.focus_brand_id) not in existing:
+            existing.insert(0, str(scan.focus_brand_id))
+            client.primary_brand_ids = [UUID(b) for b in existing]
+            logger.info(
+                f"validate_brands: added focus {scan.focus_brand_id} to "
+                f"client {client.id} primary_brand_ids "
+                f"(now {len(existing)} primaries)"
+            )
 
     scan.status = "generating_personas"
     scan.updated_at = datetime.utcnow()
@@ -1932,7 +2035,7 @@ async def retry_scan(request: Request, scan_id: str,
     here would require knowing how much was refunded, which means scanning
     the credit ledger — overkill for a recovery path.
     """
-    scan = _check_scan_access(scan_id, user, db, role="editor")
+    scan = _check_scan_access(scan_id, user, db)
 
     if scan.status != "failed":
         raise HTTPException(400, {
