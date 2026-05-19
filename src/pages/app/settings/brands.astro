@@ -204,6 +204,18 @@ if (clientId) {
                     <span class="text-[10px] font-mono text-charcoal-light w-5 text-center shrink-0">
                       <span x-text="i + 1"></span>
                     </span>
+                    <!-- Expand/collapse chevron (only when children) -->
+                    <button x-show="b.children && b.children.length > 0"
+                            type="button"
+                            @click.stop="toggleBrandExpand(b.id)"
+                            :title="isBrandExpanded(b.id) ? 'Collapse gammes' : 'Expand gammes'"
+                            class="shrink-0 text-charcoal-light hover:text-emerald-600 transition-colors">
+                      <svg class="w-3 h-3 transition-transform"
+                           :class="isBrandExpanded(b.id) ? 'rotate-90' : ''"
+                           fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/>
+                      </svg>
+                    </button>
                     <span class="text-sm font-medium text-charcoal-dark truncate min-w-[120px] max-w-[200px]" x-text="b.name"></span>
                     <input type="text"
                            :value="b.domain || ''"
@@ -236,9 +248,11 @@ if (clientId) {
                     </div>
                   </div>
 
-                  {/* Children (gammes, indented, NOT primary-promotable) */}
-                  <template x-if="(b.children || []).length > 0">
-                    <div class="ml-4 mt-1 space-y-1 border-l-2 border-emerald-200 pl-3">
+                  {/* Children (gammes, indented, NOT primary-promotable). Hidden
+                       when the brand is collapsed (default state for parents with
+                       children — Progressive Disclosure for the multi-brand case). */}
+                  <template x-if="(b.children || []).length > 0 && isBrandExpanded(b.id)">
+                    <div x-transition class="ml-4 mt-1 space-y-1 border-l-2 border-emerald-200 pl-3">
                       <template x-for="child in b.children" :key="child.id">
                         <div draggable="true"
                              @dragstart="onDragStart($event, child, 'child', b.id)"
@@ -346,6 +360,22 @@ if (clientId) {
         draggedFrom: null,        // 'selected' | 'available' | 'child'
         draggedFromParentId: null,
 
+        // Collapse state for parent brands with children. Default = ALL collapsed
+        // so a workspace with several brands × many gammes stays scannable.
+        // Mirrors the Gate 2 scan-page pattern (commits 65cabae + 3d4fd5f) but
+        // applies to My Brands here (the settings panel, not the per-scan view).
+        collapsedBrandIds: {},
+        isBrandExpanded(brandId) {
+          return !this.collapsedBrandIds[brandId];
+        },
+        toggleBrandExpand(brandId) {
+          if (this.collapsedBrandIds[brandId]) {
+            delete this.collapsedBrandIds[brandId];
+          } else {
+            this.collapsedBrandIds[brandId] = true;
+          }
+        },
+
         init() {
           this.selected = this.all.filter(b => b.is_primary);
           // Snapshot parent_id state for rollback. We snapshot only descendants
@@ -354,6 +384,21 @@ if (clientId) {
           for (const b of this.all) {
             for (const c of (b.children || [])) {
               this.initialParentMap[c.id] = b.id;
+            }
+          }
+          // Seed collapsed state so every primary brand WITH children starts
+          // folded. Re-applied after addBrand / drop so newly-added primaries
+          // also start collapsed (see _collapseAllPrimaryParents()).
+          this._collapseAllPrimaryParents();
+        },
+
+        // Mark every primary brand parent (with children) as collapsed.
+        // Used at init + after drop / addBrand / promotion-from-available
+        // so the bucket stays compact when fresh primaries arrive.
+        _collapseAllPrimaryParents() {
+          for (const b of (this.selected || [])) {
+            if (b.children && b.children.length > 0) {
+              this.collapsedBrandIds[b.id] = true;
             }
           }
         },
@@ -394,6 +439,10 @@ if (clientId) {
           if (!this.selected.find(x => x.id === b.id)) {
             if (!b.children) b.children = [];
             this.selected.push(b);
+            // Newly-promoted primary with gammes starts collapsed
+            if (b.children.length > 0) {
+              this.collapsedBrandIds[b.id] = true;
+            }
           }
         },
 
@@ -488,6 +537,8 @@ if (clientId) {
             if (idx !== -1) this.selected.splice(idx, 1);
             brand.parent_id = parent.id;
             parent.children = [...(parent.children || []), brand];
+            // Auto-expand parent so the user sees where the brand landed
+            delete this.collapsedBrandIds[parent.id];
             this._patchParent(brand.id, parent.id);
             return;
           }
@@ -497,6 +548,8 @@ if (clientId) {
           }
           brand.parent_id = parent.id;
           parent.children = [...(parent.children || []), brand];
+          // Auto-expand target parent so the user sees the dropped row
+          delete this.collapsedBrandIds[parent.id];
           this._patchParent(brand.id, parent.id);
         },
 
