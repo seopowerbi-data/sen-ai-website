@@ -1197,13 +1197,14 @@ async def validate_scan_brands(scan_id: str, user=Depends(get_current_user), db:
 
     scan.status = "generating_personas"
     scan.updated_at = datetime.utcnow()
-    _create_job(db, scan_id, "generate_personas")
 
-    # Phase BB sync : enqueue generate_brand_brief for the focus brand in
-    # parallel with generate_personas, so the brief lands in time for the
-    # first generate_article / generate_faq downstream (typically minutes
-    # later — personas + run_llm_tests take 10-30 min). Idempotent —
-    # handler checks brand.brief IS NULL and the cap before regen.
+    # Phase BB sync : enqueue generate_brand_brief FIRST, generate_personas
+    # SECOND so the worker FIFO ensures the brief is in the DB when personas
+    # boot (personas read focus_brand.brief via format_analysis_context).
+    # Brief generation = 30-60s ; personas = 10-30 min. Order matters because
+    # both jobs are queued in the same transaction — if personas is inserted
+    # first, the worker picks it up first and personas miss the brief.
+    # Idempotent — handler checks brand.brief IS NULL and the cap before regen.
     focus_brand = db.query(ClientBrand).filter(
         ClientBrand.id == scan.focus_brand_id
     ).first()
@@ -1229,8 +1230,10 @@ async def validate_scan_brands(scan_id: str, user=Depends(get_current_user), db:
             ))
             logger.info(
                 f"validate_brands: enqueued generate_brand_brief for focus "
-                f"brand {focus_brand.id} ({focus_brand.name})"
+                f"brand {focus_brand.id} ({focus_brand.name}) — runs BEFORE personas"
             )
+
+    _create_job(db, scan_id, "generate_personas")
 
     db.commit()
     return {"status": "generating_personas", "my_brand_count": my_brand_count}
