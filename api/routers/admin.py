@@ -660,6 +660,69 @@ class AuditRequestStatusUpdate(BaseModel):
     scan_id: str | None = None
 
 
+@router.get("/coverage/brand-briefs")
+async def admin_brand_brief_coverage(
+    _: User = Depends(require_superadmin),
+    db: Session = Depends(get_db),
+):
+    """Phase BB observability — % of primary brands with a generated brief per workspace.
+
+    A primary brand counts as "briefed" when ``client_brands.brief IS NOT NULL`` —
+    either generated via LLM (generations_count > 0) OR seeded via the one-shot
+    backfill script. Returns one row per client, ordered worst-coverage first
+    so partial workspaces surface at the top.
+
+    See project_phase_brand_briefs.md (coverage metric section).
+    """
+    rows = db.execute(text(
+        """
+        SELECT
+            c.id::text                                                      AS client_id,
+            c.name                                                          AS client_name,
+            COUNT(*) FILTER (WHERE cb.brief IS NOT NULL)                    AS briefed,
+            COUNT(*) FILTER (WHERE cb.brief IS NOT NULL
+                              AND cb.brief_generations_count > 0)           AS briefed_via_llm,
+            COUNT(*) FILTER (WHERE cb.brief IS NOT NULL
+                              AND (cb.brief_generations_count = 0
+                                   OR cb.brief_generations_count IS NULL))  AS seeded_only,
+            COUNT(*)                                                        AS total_primary,
+            ROUND(
+                100.0 * COUNT(*) FILTER (WHERE cb.brief IS NOT NULL)
+                / NULLIF(COUNT(*), 0),
+                1
+            )                                                               AS pct_briefed
+        FROM clients c
+        JOIN client_brands cb
+          ON cb.client_id = c.id
+         AND cb.id = ANY(c.primary_brand_ids)
+        WHERE c.primary_brand_ids IS NOT NULL
+        GROUP BY c.id, c.name
+        ORDER BY pct_briefed ASC NULLS FIRST, total_primary DESC
+        """
+    )).fetchall()
+
+    return {
+        "rows": [
+            {
+                "client_id": r.client_id,
+                "client_name": r.client_name,
+                "briefed": int(r.briefed or 0),
+                "briefed_via_llm": int(r.briefed_via_llm or 0),
+                "seeded_only": int(r.seeded_only or 0),
+                "total_primary": int(r.total_primary or 0),
+                "pct_briefed": float(r.pct_briefed) if r.pct_briefed is not None else 0.0,
+            }
+            for r in rows
+        ],
+        "totals": {
+            "workspaces": len(rows),
+            "primary_brands_total": sum(int(r.total_primary or 0) for r in rows),
+            "primary_brands_briefed": sum(int(r.briefed or 0) for r in rows),
+            "primary_brands_briefed_via_llm": sum(int(r.briefed_via_llm or 0) for r in rows),
+        },
+    }
+
+
 @router.get("/audit-requests")
 async def list_audit_requests(
     status: str | None = Query(default=None, description="Filter by status"),
