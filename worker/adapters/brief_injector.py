@@ -268,8 +268,70 @@ def format_vertical_examples(scan_config: dict | None) -> str:
     return "\n".join(lines)
 
 
+def format_workspace_brief_for_audience_only(client_apps: dict | None,
+                                              brand_brief: dict | None = None) -> str:
+    """Render ONLY the audience subset of the merged workspace+brand brief.
+
+    BB.9 separation-of-concerns fix : generate_personas needs to know WHO
+    the brand talks to (audience demographics, segments, topics) but NOT
+    HOW the brand speaks (editorial_voice, tone_dos/donts, brand_story,
+    heritage, taglines, claims_guidelines). Mixing both pollutes the
+    persona prompt — the LLM ends up mirroring brand voice traits ("expert
+    reassuring") into persona personality descriptions, producing personas
+    that read like brand brochures instead of real audience profiles.
+
+    Renders a strictly audience-coloured block :
+      - industry             (workspace, for category context)
+      - target_audience      (brand wins per-field / workspace fallback)
+      - audience_segments    (brand)
+      - expertise_topics     (brand, cap 10 — these define what topics
+                              the brand wants to own, which biases persona
+                              questions toward those topics)
+
+    Voice-only fields are deliberately dropped. Callers that need them
+    (article + faq generation) use the full ``format_workspace_brief``.
+
+    Returns "" if no audience signal is available.
+    """
+    workspace = (client_apps or {}).get("client_brief") or {}
+    brand = brand_brief or {}
+
+    industry = (workspace.get("industry") or "").strip()
+    # Brand wins per-field on target_audience (mirrors full-render logic).
+    brand_audience = (brand.get("target_audience") or "").strip()
+    workspace_audience = (workspace.get("target_audience") or "").strip()
+    target_audience = brand_audience or workspace_audience
+
+    audience_segments = [
+        s for s in (brand.get("audience_segments") or [])
+        if isinstance(s, str) and s.strip()
+    ]
+    expertise_topics = [
+        t for t in (brand.get("expertise_topics") or [])
+        if isinstance(t, str) and t.strip()
+    ][:10]  # cap matches full-render cap
+
+    if not industry and not target_audience and not audience_segments and not expertise_topics:
+        return ""
+
+    lines = ["## Audience context (who reads the content)"]
+    if industry:
+        lines.append(f"Industry: {industry}")
+    if target_audience:
+        lines.append(f"Target audience: {target_audience}")
+    if audience_segments:
+        lines.append(f"Audience segments: {', '.join(audience_segments)}")
+    if expertise_topics:
+        lines.append(
+            f"Brand's expertise topics (questions tend to cluster here): "
+            f"{', '.join(expertise_topics)}"
+        )
+    return "\n".join(lines)
+
+
 def format_analysis_context(scan_config: dict | None, client_apps: dict | None,
-                            brand_brief: dict | None = None) -> str:
+                            brand_brief: dict | None = None,
+                            audience_only: bool = False) -> str:
     """Combine domain brief + workspace brief + vertical examples for analysis prompts.
 
     Analysers (classify_topics, generate_personas, brand_analyzer, brand_cleanup,
@@ -281,8 +343,12 @@ def format_analysis_context(scan_config: dict | None, client_apps: dict | None,
 
     Phase BB : optional ``brand_brief`` threads through to format_workspace_brief
     to surcharge the workspace block with focus-brand specifics (voice, audience,
-    competitors, expertise topics). Currently only ``generate_personas`` passes
-    it ; other analysers see the legacy workspace-only block.
+    competitors, expertise topics).
+
+    BB.9 : ``audience_only=True`` routes through
+    ``format_workspace_brief_for_audience_only`` instead of the full render.
+    Used by generate_personas to avoid leaking brand voice into persona
+    descriptions. Article / FAQ generators keep the full render.
 
     Returns "" if all three are empty. Blocks are separated by blank lines.
     """
@@ -290,7 +356,10 @@ def format_analysis_context(scan_config: dict | None, client_apps: dict | None,
     db_block = format_brief_context(scan_config)
     if db_block:
         parts.append(db_block)
-    wb_block = format_workspace_brief(client_apps, brand_brief)
+    if audience_only:
+        wb_block = format_workspace_brief_for_audience_only(client_apps, brand_brief)
+    else:
+        wb_block = format_workspace_brief(client_apps, brand_brief)
     if wb_block:
         parts.append(wb_block)
     ve_block = format_vertical_examples(scan_config)

@@ -82,10 +82,16 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
         topics_with_keywords=topics_with_keywords,
         nb_personas=nb_personas,
         anthropic_api_key=settings.anthropic_api_key,
+        # BB.9 audience-only render : strip brand voice fields (editorial_voice,
+        # tone_dos/donts, brand_story, heritage, taglines, claims_guidelines)
+        # from the persona prompt so Claude doesn't mirror them into persona
+        # personality descriptions. Personas describe AUDIENCE, not brand voice.
+        # See project_phase_brand_briefs.md foot-gun #18.
         domain_context=format_analysis_context(
             scan.config,
             _client.apps if _client else None,
             _focus_brief,
+            audience_only=True,
         ),
     ))
 

@@ -12,7 +12,11 @@ that breaks the merge contract surfaces here.
 
 from __future__ import annotations
 
-from adapters.brief_injector import format_workspace_brief
+from adapters.brief_injector import (
+    format_workspace_brief,
+    format_workspace_brief_for_audience_only,
+    format_analysis_context,
+)
 
 
 WS_BRIEF = {
@@ -194,3 +198,119 @@ class TestPartialBrand:
         out = format_workspace_brief({"client_brief": WS_BRIEF}, bb)
         assert "### Focus brand: (unnamed brand)" in out
         assert "Editorial voice (override): punchy" in out
+
+
+class TestAudienceOnlyRender:
+    """BB.9 — audience-only render strips voice fields from persona prompt.
+
+    These tests pin the contract : voice / story / claims fields MUST be
+    absent from the audience-only block ; audience fields MUST be present.
+    Anyone who adds a new field to BrandBrief MUST classify it explicitly :
+    either it joins this filter, or it gets the full render only.
+    """
+
+    def _full_brand(self):
+        # Build a brand brief touching every voice + audience field, so we
+        # can verify the partition is clean.
+        return dict(BB_AVENE,
+                    heritage="Founded 1736",
+                    brand_story="Three centuries of dermatology",
+                    tone_dos=["soulager", "apaiser"],
+                    tone_donts=["miracle", "instantané"],
+                    claims_guidelines=["No cure claims"],
+                    taglines=["Skincare for sensitive skin"])
+
+    def test_audience_subset_present(self):
+        out = format_workspace_brief_for_audience_only(
+            {"client_brief": WS_BRIEF}, self._full_brand()
+        )
+        assert "## Audience context" in out
+        assert "Industry: Dermo-cosmetics" in out
+        # Brand wins on target_audience
+        assert "Women 25-55 with sensitive skin" in out
+        # Audience segments + expertise topics
+        assert "sensitive skin" in out and "atopic" in out
+        assert "rosacea" in out
+
+    def test_voice_fields_absent(self):
+        out = format_workspace_brief_for_audience_only(
+            {"client_brief": WS_BRIEF}, self._full_brand()
+        )
+        # NONE of the voice-coloured fields should leak
+        assert "editorial_voice" not in out.lower()
+        assert "Editorial voice" not in out
+        assert "Tone DOs" not in out
+        assert "Tone DON'Ts" not in out
+        assert "soulager" not in out
+        assert "miracle" not in out
+        assert "Heritage" not in out
+        assert "Brand story" not in out
+        assert "Taglines" not in out
+        assert "Claims guidelines" not in out
+        assert "differentiators" not in out.lower()
+        assert "hero" not in out.lower()
+        assert "signature" not in out.lower()
+        assert "competitors" not in out.lower()
+
+    def test_workspace_audience_fallback_when_brand_empty(self):
+        bb = {"name": "Avène"}  # No target_audience on brand
+        out = format_workspace_brief_for_audience_only(
+            {"client_brief": WS_BRIEF}, bb
+        )
+        # Falls back to workspace.target_audience
+        assert "Adults 25-65 with sensitive skin" in out
+
+    def test_returns_empty_when_no_signal(self):
+        assert format_workspace_brief_for_audience_only(None, None) == ""
+        assert format_workspace_brief_for_audience_only({}, {}) == ""
+
+    def test_expertise_topics_capped_at_10(self):
+        bb = dict(BB_AVENE,
+                  expertise_topics=[f"topic-{i}" for i in range(25)])
+        out = format_workspace_brief_for_audience_only(
+            {"client_brief": WS_BRIEF}, bb
+        )
+        line = next(l for l in out.split("\n") if "expertise topics" in l.lower())
+        assert "topic-0" in line
+        assert "topic-9" in line
+        assert "topic-10" not in line
+        assert "topic-24" not in line
+
+
+class TestAnalysisContextAudienceOnly:
+    """BB.9 — format_analysis_context(audience_only=True) routes correctly."""
+
+    def test_audience_only_flag_strips_voice(self):
+        brand = dict(BB_AVENE,
+                     tone_dos=["soulager"],
+                     tone_donts=["miracle"],
+                     heritage="Founded 1736")
+        out = format_analysis_context(
+            scan_config={"domain_brief": {"company": "Pierre Fabre",
+                                           "industry": "Dermo-cosmetics"}},
+            client_apps={"client_brief": WS_BRIEF},
+            brand_brief=brand,
+            audience_only=True,
+        )
+        # Domain Context still present (analysers need it)
+        assert "Pierre Fabre" in out
+        # Audience block present
+        assert "## Audience context" in out
+        # Voice fields stripped
+        assert "soulager" not in out
+        assert "miracle" not in out
+        assert "1736" not in out
+        # Not the full workspace block either
+        assert "### Focus brand" not in out
+
+    def test_default_keeps_full_render(self):
+        # audience_only defaults to False — backward compatible for
+        # article/faq callers that pass the brand brief but want everything.
+        brand = dict(BB_AVENE, tone_dos=["soulager"])
+        out = format_analysis_context(
+            scan_config={"domain_brief": {"company": "PF"}},
+            client_apps={"client_brief": WS_BRIEF},
+            brand_brief=brand,
+        )
+        assert "soulager" in out
+        assert "### Focus brand" in out
