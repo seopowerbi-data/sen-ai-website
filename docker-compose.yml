@@ -43,12 +43,41 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Scan-pipeline worker — handles every job EXCEPT content generation
+  # (article/FAQ). Stays single-threaded so we don't introduce cross-job
+  # races inside the same scan_id. Pipeline jobs are seconds-fast each,
+  # so serial is fine here.
   worker:
     build:
       context: ./worker
       dockerfile: Dockerfile
     container_name: senai-worker
     env_file: ./worker/.env
+    environment:
+      WORKER_ID: worker-scan
+      WORKER_JOB_TYPES_EXCLUDE: generate_article,generate_faq
+    volumes:
+      - ./shared:/app/shared:ro
+      - nw_cache:/app/cache/natural_writing
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Content-gen worker — only `generate_article` (5-15 min) and `generate_faq`
+  # (~60 sec). Lives in its own process so a long article gen no longer
+  # head-of-line-blocks the scan pipeline. Per-item dedup in the API
+  # (content_items.py generate_content) means two workers can't grab the
+  # same item, so this is safe to scale to N replicas later if needed.
+  worker-content:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: senai-worker-content
+    env_file: ./worker/.env
+    environment:
+      WORKER_ID: worker-content
+      WORKER_JOB_TYPES_INCLUDE: generate_article,generate_faq
     volumes:
       - ./shared:/app/shared:ro
       - nw_cache:/app/cache/natural_writing

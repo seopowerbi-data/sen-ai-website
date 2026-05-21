@@ -24,6 +24,25 @@ class Settings(BaseSettings):
     worker_id: str = "worker-1"
     poll_interval: int = 2
 
+    # Job-type filtering for multi-worker fan-out (Step 1 of worker scaling).
+    # Comma-separated lists. Empty = no filter (legacy behavior, one worker
+    # handles everything). Typical split:
+    #   worker-content : WORKER_JOB_TYPES_INCLUDE=generate_article,generate_faq
+    #   worker-scan    : WORKER_JOB_TYPES_EXCLUDE=generate_article,generate_faq
+    # The 10-min generate_article no longer blocks the (seconds-fast) scan
+    # pipeline jobs. Both workers stay single-threaded so we don't introduce
+    # cross-job races inside the same scan_id.
+    worker_job_types_include: str = ""
+    worker_job_types_exclude: str = ""
+
+    @property
+    def job_types_include(self) -> list[str]:
+        return [s.strip() for s in self.worker_job_types_include.split(",") if s.strip()]
+
+    @property
+    def job_types_exclude(self) -> list[str]:
+        return [s.strip() for s in self.worker_job_types_exclude.split(",") if s.strip()]
+
     # Per-task model overrides — read from MODEL_<TASK_UPPER> env vars.
     # Defaults reflect the production state at the time of TASK_MODELS introduction;
     # changing model_* defaults in code is fine, but env override is the supported way

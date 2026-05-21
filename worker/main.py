@@ -529,18 +529,44 @@ def enqueue_post_publish_measurements() -> None:
 
 
 def poll_and_execute():
-    """Pick one pending job and execute it."""
+    """Pick one pending job and execute it.
+
+    Optional job_type filter via env (`WORKER_JOB_TYPES_INCLUDE` /
+    `WORKER_JOB_TYPES_EXCLUDE`). Empty lists mean "no filter" — legacy
+    single-worker behavior. The split-worker setup uses INCLUDE on the
+    content-gen worker and EXCLUDE on the scan-pipeline worker so the
+    10-min `generate_article` never sits in front of a 3-sec
+    `fetch_keywords` (FIFO head-of-line blocking).
+    """
     db = SessionLocal()
     try:
+        include = settings.job_types_include
+        exclude = settings.job_types_exclude
+
+        # Build WHERE fragment for type filter. We deliberately use ANY(:list)
+        # rather than IN/NOT IN with a tuple so the SQL stays static — easier
+        # to read in logs and no SQL-injection surface (job_type values are
+        # registered handler keys, not user input).
+        params: dict = {}
+        type_clauses = []
+        if include:
+            type_clauses.append("job_type = ANY(:incl)")
+            params["incl"] = include
+        if exclude:
+            type_clauses.append("NOT (job_type = ANY(:excl))")
+            params["excl"] = exclude
+        type_sql = (" AND " + " AND ".join(type_clauses)) if type_clauses else ""
+
         # FOR UPDATE SKIP LOCKED: safe concurrent polling
         job = db.execute(
-            text("""
+            text(f"""
                 SELECT id FROM jobs
-                WHERE status = 'pending'
+                WHERE status = 'pending'{type_sql}
                 ORDER BY created_at
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
-            """)
+            """),
+            params,
         ).fetchone()
 
         if not job:
