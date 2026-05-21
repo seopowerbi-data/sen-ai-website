@@ -1175,25 +1175,19 @@ async def validate_scan_brands(scan_id: str, user=Depends(get_current_user), db:
     if not focus_sbc or focus_sbc.classification != "my_brand" or not focus_sbc.is_focus:
         raise HTTPException(400, "Focus brand row is inconsistent — reclassify it as my_brand with is_focus=true")
 
-    # Sync Gate 2 → workspace primaries (companion to the inverse sweep in
-    # routers/clients.update_client_promotion). The focus brand the user just
-    # validated on this scan is logically a my-brand at the workspace level
-    # too — without this, Settings → My Primary Brands stays empty after the
-    # user finishes Gate 2 (e.g. imported the seo-llm Avène cache then
-    # validated focus=Eau Thermale Avène) and content gen falls back to
-    # PromotionUnsetError. Additive only : we don't strip primaries that
-    # aren't on this scan, and we don't reorder.
-    client = db.query(Client).filter(Client.id == scan.client_id).first()
-    if client:
-        existing = [str(b) for b in (client.primary_brand_ids or [])]
-        if str(scan.focus_brand_id) not in existing:
-            existing.insert(0, str(scan.focus_brand_id))
-            client.primary_brand_ids = [UUID(b) for b in existing]
-            logger.info(
-                f"validate_brands: added focus {scan.focus_brand_id} to "
-                f"client {client.id} primary_brand_ids "
-                f"(now {len(existing)} primaries)"
-            )
+    # NOTE 2026-05-21 — auto-promote of focus_brand to client.primary_brand_ids
+    # REMOVED here. The previous behavior prepended every validated focus brand
+    # at index 0 of the workspace primaries, which polluted the workspace
+    # whenever the user ran exploratory scans (test domains, one-off audits) —
+    # foot-gun observed on Pierre Fabre when cocoonr.fr and praxedo.fr scans
+    # added those non-PF brands as workspace primaries (with auto-generated
+    # briefs via BB.6 chain). Documented as foot-gun #19 in
+    # project_phase_brand_briefs.md.
+    #
+    # Explicit promotion to workspace primaries is now opt-in via
+    # /app/settings/brands (drag Available → Selected → Save). The brand brief
+    # auto-enqueue below stays untouched — briefs are per-brand identity, cheap,
+    # and dormant on non-primary brands until they're promoted later (idempotent).
 
     scan.status = "generating_personas"
     scan.updated_at = datetime.utcnow()
