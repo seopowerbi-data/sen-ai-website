@@ -185,32 +185,40 @@ function ageLabel(iso: string | null): string {
       {scans.length > 0 && (
         <div class="flex items-center gap-2">
           <span class="text-[11px] uppercase tracking-wide font-semibold text-charcoal-light">Scan:</span>
-          <select onchange="const u=new URL(window.location); this.value ? u.searchParams.set('scan_id', this.value) : u.searchParams.delete('scan_id'); window.location = u.toString();"
-                  class="text-xs border border-gray-200 rounded-md px-2 py-1 bg-white max-w-[320px]">
-            <option value="">All scans</option>
-            {(() => {
-              // Disambiguate labels when multiple scans share the same name
-              // (common with "test 1", "test 2", etc. created during dev).
-              // Always append the domain when the name alone doesn't make
-              // the scan unique, and prepend a short id suffix when the
-              // domain ALSO collides (rare but happens).
-              const nameCount: any = {};
-              for (const s of scans) {
-                const k = ((s.name || s.domain || '') as string).trim();
-                nameCount[k] = (nameCount[k] || 0) + 1;
-              }
-              return scans.map((s: any) => {
-                const name = (s.name || '').trim();
-                const domain = (s.domain || '').trim();
-                const isAmbiguous = nameCount[name] > 1;
-                let label = name || domain;
-                if (name && isAmbiguous) {
-                  label = `${name} · ${domain || s.id.slice(0, 6)}`;
+          {/* Form-submit pattern: native GET form, hidden inputs preserve sibling
+              filters (content_type / show_rejected) so changing scan_id never
+              wipes them. onchange="this.form.submit()" is the most reliable
+              cross-browser auto-submit — replaces a previous inline
+              `window.location=` handler that didn't fire reliably in some
+              browser/extension combos and left the page on /app/content?
+              with no scan_id in the URL. */}
+          <form method="GET" class="flex items-center gap-2">
+            {ctParam !== 'all' && <input type="hidden" name="content_type" value={ctParam} />}
+            {showRejected && <input type="hidden" name="show_rejected" value="1" />}
+            <select name="scan_id" onchange="this.form.submit()"
+                    class="text-xs border border-gray-200 rounded-md px-2 py-1 bg-white max-w-[320px]">
+              <option value="">All scans</option>
+              {(() => {
+                // Disambiguate labels when multiple scans share the same name
+                // (common with "test 1", "test 2", etc. created during dev).
+                const nameCount: any = {};
+                for (const s of scans) {
+                  const k = ((s.name || s.domain || '') as string).trim();
+                  nameCount[k] = (nameCount[k] || 0) + 1;
                 }
-                return <option value={s.id} selected={scanParam === s.id}>{label}</option>;
-              });
-            })()}
-          </select>
+                return scans.map((s: any) => {
+                  const name = (s.name || '').trim();
+                  const domain = (s.domain || '').trim();
+                  const isAmbiguous = nameCount[name] > 1;
+                  let label = name || domain;
+                  if (name && isAmbiguous) {
+                    label = `${name} · ${domain || s.id.slice(0, 6)}`;
+                  }
+                  return <option value={s.id} selected={scanParam === s.id}>{label}</option>;
+                });
+              })()}
+            </select>
+          </form>
         </div>
       )}
 
