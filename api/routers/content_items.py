@@ -1186,6 +1186,13 @@ class SuggestMediaRequest(BaseModel):
     require_price: bool = False
     exclude_domains: list[str] = []
     top_k: int = 5
+    # Phase MR.3 — opt-in LLM web_search fallback (source 5). Debits 1 content
+    # credit before enqueue ; refunded by the worker if it adds 0 new media.
+    use_llm_fallback: bool = False
+
+
+# Content-credit cost of a web-search media suggestion (source 5).
+SUGGEST_MEDIA_WEB_SEARCH_COST = 1
 
 
 class AcceptSuggestionRequest(BaseModel):
@@ -1276,6 +1283,35 @@ async def suggest_media(
                 "message": "Suggestion already in flight",
             }
 
+    # Phase MR.3 — opt-in LLM web_search (source 5) is credit-debited BEFORE
+    # enqueue (cap-then-call). The worker REFUNDS if the search adds 0 new
+    # media (ratified policy). Sources 1-4 stay free. max_attempts=1 here so a
+    # retry can't fire a SECOND paid LLM call against one debit.
+    credit_debited = False
+    if body.use_llm_fallback:
+        from routers.stripe import add_credits
+        try:
+            add_credits(
+                client_id=str(item.scan.client_id),
+                credit_type="content",
+                amount=-SUGGEST_MEDIA_WEB_SEARCH_COST,
+                description=f"Media web search: {item_id}",
+                db=db,
+                scan_id=str(item.scan_id),
+            )
+            credit_debited = True
+        except ValueError as e:
+            raise HTTPException(402, {
+                "error": "insufficient_credits",
+                "message": (
+                    f"Searching the web for media costs "
+                    f"{SUGGEST_MEDIA_WEB_SEARCH_COST} content credit. "
+                    f"You're out — buy more on Settings, or use the free "
+                    f"suggestions already shown."
+                ),
+                "detail": str(e),
+            })
+
     payload = {
         "item_id": item_id,
         "strategy": body.strategy,
@@ -1283,13 +1319,16 @@ async def suggest_media(
         "require_price": body.require_price,
         "exclude_domains": [d for d in (body.exclude_domains or []) if d],
         "top_k": max(1, min(20, body.top_k or 5)),
+        "use_llm_fallback": body.use_llm_fallback,
     }
     job = Job(
         scan_id=item.scan_id,
         job_type="suggest_media",
         status="pending",
         payload=payload,
-        max_attempts=2,
+        # LLM-fallback jobs run once : a retry would burn a 2nd LLM call
+        # without a 2nd debit. DB-only jobs can safely retry twice.
+        max_attempts=1 if body.use_llm_fallback else 2,
     )
     db.add(job)
     db.commit()
@@ -1301,6 +1340,8 @@ async def suggest_media(
         target_type="content_item", target_id=item_id,
         details={"job_id": str(job.id), "strategy": body.strategy,
                  "require_price": body.require_price,
+                 "use_llm_fallback": body.use_llm_fallback,
+                 "credit_debited": credit_debited,
                  "attempts_used": attempts_used + 1},
     )
 
@@ -1310,6 +1351,7 @@ async def suggest_media(
         "status": "pending",
         "attempts_used": attempts_used + 1,
         "attempts_cap": SUGGEST_MEDIA_MAX_ATTEMPTS_PER_ITEM,
+        "credit_debited": credit_debited,
     }
 
 

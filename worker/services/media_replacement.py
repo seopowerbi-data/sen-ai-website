@@ -156,12 +156,21 @@ def suggest(
     top_k: int = DIVERSIFICATION_DEFAULT_TOP_K,
     weights: dict[str, float] | None = None,
     footprint_cap: int = FOOTPRINT_CAP_DEFAULT,
+    use_llm_fallback: bool = False,     # Phase MR.3 — source 5 (credit-debited)
+    openai_api_key: str | None = None,
 ) -> dict:
     """Return top-K replacement-media suggestions for a netlinking content item.
 
-    Returns ``{"suggestions": [...], "llm_fallback_used": False, "diagnostics": {...}}``.
-    Does NOT debit credits — that's the endpoint's responsibility for source 5
-    (Sprint 3). Does NOT mutate state — caller writes media_feedback on accept.
+    Returns ``{"suggestions": [...], "llm_fallback_used": bool, "llm_new_count":
+    int, "diagnostics": {...}}``. Does NOT debit credits — the API debits before
+    enqueue. `llm_new_count` lets the worker decide whether to refund (0 new
+    media → refund per the ratified policy). Does NOT mutate state — caller
+    writes media_feedback on accept.
+
+    Source 5 (LLM web_search) runs ONLY when `use_llm_fallback=True` AND an
+    `openai_api_key` is provided. It discovers buyable media via web search,
+    re-validates them through LinkFinder (price), then runs them through the
+    same hard filters + scoring as the DB sources.
 
     Raises ``IntentNotEligibleError`` when the underlying question's
     intent_category is in SAFETY_INTENTS — Phase B compliance guard, identical
@@ -227,6 +236,19 @@ def suggest(
     # Source 4 — media_catalog
     _ingest_media_catalog(db, candidates, country, language)
 
+    # Source 5 — LLM web_search fallback (credit-debited, opt-in). Tracks which
+    # domains were NEWLY discovered here so the worker can refund if 0 new.
+    llm_fallback_used = False
+    llm_new_domains: set[str] = set()
+    if use_llm_fallback and openai_api_key:
+        llm_fallback_used = True
+        llm_new_domains = _ingest_llm_web_search(
+            db, content_item, question, candidates,
+            country, language, scan,
+            exclude_norm | own_brand_domains | competitor_domains,
+            openai_api_key,
+        )
+
     # ── Hard filters ─────────────────────────────────────────────────────
     kept: dict[str, _Candidate] = {}
     drop_reasons: dict[str, int] = defaultdict(int)
@@ -285,9 +307,14 @@ def suggest(
     # ── Diversification top-K ────────────────────────────────────────────
     top = _diversify(scored, top_k)
 
+    # How many of the LLM-discovered domains survived filtering into the
+    # scored pool — drives the worker's refund decision (0 new → refund).
+    llm_new_count = sum(1 for s in scored if s.domain in llm_new_domains)
+
     return {
         "suggestions": [_suggestion_to_dict(s) for s in top],
-        "llm_fallback_used": False,
+        "llm_fallback_used": llm_fallback_used,
+        "llm_new_count": llm_new_count,
         "diagnostics": {
             "country": country,
             "language": language,
@@ -296,6 +323,8 @@ def suggest(
             "candidates_scored": pre_filter_count,
             "candidates_after_strategy": len(scored),
             "strategy_fallback": strategy_fallback,
+            "llm_discovered": len(llm_new_domains),
+            "llm_new_in_results": llm_new_count,
             "drop_reasons": dict(drop_reasons),
             "strategy": strategy,
             "weights": weights,
@@ -589,6 +618,75 @@ def _ingest_media_catalog(
         cand.linkfinder_last_check = r.linkfinder_last_check
 
 
+def _ingest_llm_web_search(
+    db: Session, content_item, question,
+    candidates: dict[str, _Candidate],
+    country: str, language: str, scan,
+    exclude_domains: set[str],
+    openai_api_key: str,
+) -> set[str]:
+    """Source 5 — LLM web_search → buyable media → LinkFinder re-validation.
+
+    Returns the set of domains NEWLY added by this source (not already present
+    from sources 1-4). The caller counts how many survive to the scored pool
+    for the refund decision.
+
+    Each discovered domain is LinkFinder-priced inline (1 batch call) so it can
+    be scored on the same price/authority axis as catalog candidates. Domains
+    LinkFinder can't price keep price_eur=None (still surfaced — cas A outreach).
+    """
+    topic = " · ".join([t for t in [content_item.topic_name, content_item.target_question] if t])
+    persona = content_item.persona_name or ""
+    vertical = ((scan.config or {}).get("domain_brief") or {}).get("industry") or ""
+
+    try:
+        from services.media_web_discovery import discover_media_via_web
+        discovered = discover_media_via_web(
+            topic=topic, persona=persona, country=country, language=language,
+            vertical=vertical, exclude_domains=exclude_domains,
+            openai_api_key=openai_api_key,
+        )
+    except Exception:
+        logger.exception("media_replacement: LLM web discovery crashed")
+        return set()
+
+    if not discovered:
+        return set()
+
+    # LinkFinder price re-validation for the discovered domains (1 batch call).
+    prices: dict[str, dict] = {}
+    try:
+        from seo_llm.src.link_finder_client import LinkFinderClient
+        lf = LinkFinderClient()
+        if lf.is_api_configured:
+            prices = lf.get_prices_batch([m["domain"] for m in discovered])
+    except Exception:
+        logger.exception("media_replacement: LinkFinder re-validation of LLM media crashed")
+
+    new_domains: set[str] = set()
+    for m in discovered:
+        d = _normalize_domain(m["domain"])
+        if not d:
+            continue
+        is_new = d not in candidates
+        cand = candidates.get(d)
+        if cand is None:
+            cand = _Candidate(domain=d, country=country, language=language)
+            candidates[d] = cand
+        cand.sources.add("llm_web_search")
+        # Reason text carried via sample (the "why it fits" from the LLM)
+        if m.get("reason") and not cand.sample_url:
+            # No URL from web discovery ; leave sample_url None, reason is logged
+            pass
+        info = prices.get(d) or {}
+        if info.get("source") != "not_found":
+            if info.get("prix_ht") is not None and cand.price_eur is None:
+                cand.price_eur = info.get("prix_ht")
+        if is_new:
+            new_domains.add(d)
+    return new_domains
+
+
 # ─── Filters ────────────────────────────────────────────────────────────
 
 
@@ -737,6 +835,9 @@ def _score_to_suggestion(
         )
     elif decayed >= 3:
         reasons.append("Often cited by AIs on related topics")
+    elif "llm_web_search" in cand.sources and "scan_citation" not in cand.sources:
+        # Source-5-only candidate : no citation history, found via live web search.
+        reasons.append("Found by AI web search — relevant outlet for this topic")
 
     # persona_audience — STUB Sprint 2. Will use brief target_audience + audience_tags in Sprint 3.
     # Document the stub so callers know why component is dark.
@@ -938,6 +1039,7 @@ def _empty_result(reason: str) -> dict:
     return {
         "suggestions": [],
         "llm_fallback_used": False,
+        "llm_new_count": 0,
         "diagnostics": {"empty_reason": reason},
     }
 
