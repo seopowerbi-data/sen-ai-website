@@ -62,8 +62,8 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
         raise RuntimeError("No topics with keywords found")
 
     # --- Generate personas + questions (1 Claude call per topic, all in parallel) ---
-    scan.progress_message = f"Generating {nb_personas} personas per topic (parallel)..."
-    scan.progress_pct = 10
+    scan.progress_message = f"Generating personas — {len(topics_with_keywords)} topics × {nb_personas} personas (parallel)…"
+    scan.progress_pct = 15
     db.commit()
 
     from adapters.brief_injector import format_analysis_context

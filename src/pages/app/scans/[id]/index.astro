@@ -523,7 +523,15 @@ const isReviewing = effectiveView !== null && (
           ) : (
             <Fragment>
               <p class="text-charcoal-dark font-medium mb-1">{scan.progress_message || 'Processing...'}</p>
-              <p class="text-sm text-charcoal-light">This usually takes 30 seconds. You can leave this page.</p>
+              {typeof scan.progress_pct === 'number' && scan.progress_pct > 0 && (
+                <div class="max-w-md mx-auto mt-3 mb-1">
+                  <div class="h-2 bg-gray-100 rounded-full overflow-hidden">
+                    <div class="h-2 bg-coral rounded-full transition-all duration-500" style={`width:${Math.max(5, scan.progress_pct)}%`}></div>
+                  </div>
+                  <p class="text-[11px] text-charcoal-light mt-1 text-right tabular-nums">{scan.progress_pct}%</p>
+                </div>
+              )}
+              <p class="text-sm text-charcoal-light">This usually takes 30s–2&nbsp;min depending on the number of topics. You can leave this page.</p>
             </Fragment>
           )}
           <meta http-equiv="refresh" content="3" />
