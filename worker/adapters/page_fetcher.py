@@ -59,6 +59,14 @@ def fetch_page(url: str) -> dict:
             r = c.get(url)
             out["status"] = r.status_code
             out["final_url"] = str(r.url)
+            # Treat anti-bot / blocked responses as fetch errors so the UI can
+            # surface "blocked by site" instead of a misleading 0-score audit
+            # built from a Cloudflare "Just a moment..." challenge page.
+            # 401/403/429 are the standard bot-block triplet. 503 with html
+            # body is typically a Cloudflare interstitial.
+            if r.status_code in (401, 403, 429, 503):
+                out["error"] = f"blocked_http_{r.status_code}"
+                return out
             ctype = (r.headers.get("Content-Type") or "").lower()
             if "html" not in ctype and "xml" not in ctype:
                 out["error"] = f"non_html_content_type:{ctype[:80]}"

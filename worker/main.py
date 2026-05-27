@@ -161,6 +161,20 @@ def load_handlers():
 # the scan as failed even though it actually completed long ago).
 CONTENT_ITEM_JOB_TYPES = {"generate_faq", "generate_article"}
 
+# Post-scan analytical / audit jobs. These run AFTER a scan has reached its
+# terminal state ; their failure must NOT cascade back to scan.status='failed'
+# (that would blank all sub-tab pages via the layout's status-guard redirect).
+# Treated as independent of the scan pipeline lifecycle.
+POST_SCAN_AUDIT_JOB_TYPES = {
+    "audit_scan_pages",         # Sprint 5
+    "audit_scan_schemas",       # Sprint 6
+    "audit_competitor_pages",   # Sprint 7
+    "check_brand_wikipedia",    # Sprint 4
+    "refresh_ai_snapshot",
+    "measure_publish_outcome",
+    "suggest_media",
+}
+
 
 # Per-content-type credit-ledger description labels. The debit (created at
 # enqueue time in api/routers/content_items.py:generate_content) and the
@@ -824,7 +838,17 @@ def poll_and_execute():
                         "permanent": is_permanent,
                     }
 
-                    if job_obj.job_type in CONTENT_ITEM_JOB_TYPES:
+                    if job_obj.job_type in POST_SCAN_AUDIT_JOB_TYPES:
+                        # Post-scan audit / analytics job (S4 Wikipedia, S5
+                        # Princeton, S6 schemas, S7 competitors, MR.4 outcome,
+                        # MR.2 suggest_media, Pilier 5 refresh). The parent
+                        # scan reached its terminal state before this job ran ;
+                        # marking it 'failed' would blank all sub-tab pages
+                        # via the layout's status-guard redirect (incident
+                        # 2026-05-28). Just record the job-level error.
+                        pass
+
+                    elif job_obj.job_type in CONTENT_ITEM_JOB_TYPES:
                         # Content-item job (one FAQ / article). The parent scan
                         # already completed; only this item failed. Don't cascade
                         # to scan.status='failed' and don't run the scan-wide
