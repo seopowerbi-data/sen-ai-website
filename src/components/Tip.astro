@@ -80,6 +80,80 @@ const TIPS: Record<string, string> = {
     + '<em>Viewer</em> — read-only access to scans + content.<br/>'
     + '<em>No access</em> — workspace hidden from this member.',
   members_remove: 'Remove this member from the organization.<br/><em>Their access to every workspace is revoked at the same time.</em>',
+
+  // ── Sprint 4 — Wikipedia tab ──────────────────────────────────────────
+  wikipedia_present: 'This brand has a Wikipedia page.<br/>'
+    + '<em>ChatGPT cites Wikipedia ~48% of the time, so having one is a strong AI-visibility lever.</em>',
+  wikipedia_absent: 'No Wikipedia page found for this brand.<br/>'
+    + '<em>Notability bar is high — start by accumulating press citations rather than self-publishing.</em>',
+  wikipedia_disambig: 'A Wikipedia page exists for this name but it disambiguates to multiple entities.<br/>'
+    + '<em>Risk : LLM may cite the wrong entity. Consider a clarifying parenthetical (Brand) entry.</em>',
+
+  // ── Sprint 5 — Page Audit (Princeton GEO) ────────────────────────────
+  geo_avg_score: 'Average Princeton GEO content score (0–100) across the pages of your site that LLMs cite.<br/>'
+    + '<em>Higher = stronger LLM-citation magnet. Source : Aggarwal et al., KDD 2024.</em>',
+  geo_page_score: 'Princeton GEO content score for this page.<br/>'
+    + 'Weighted blend of <strong>statistics density</strong>, <strong>source citations</strong>, <strong>quotations</strong>, <strong>authoritative phrasing</strong>, fluency and readability.<br/>'
+    + '<em>≥70 strong · 40–69 partial · &lt;40 weak.</em>',
+  geo_page_score_contexte: 'Princeton GEO score derived from the LLM citation snippet, not the full page.<br/>'
+    + '<em>Site is bot-blocked so we couldn\'t fetch the live page. Only comparable across snippet-only rows.</em>',
+  geo_pattern_statistics: 'Numerical claims, percentages, patient counts, dosages.<br/>'
+    + '<em>Top-3 lift in the Princeton paper (~30–40% citation uplift).</em>',
+  geo_pattern_cite_sources: 'Outbound links to authoritative sites (ANSM, HAS, peer-reviewed journals, government).<br/>'
+    + '<em>Top-3 lift signal for LLM trust.</em>',
+  geo_pattern_quotation: 'Direct quotes from experts, dermatologists, clinical leads.<br/>'
+    + '<em>Top-3 lift signal in the Princeton paper.</em>',
+  geo_pattern_authority: 'Credentials (Dr., PhD, professor), study references, professional bodies.<br/>'
+    + '<em>Smaller lift than top-3 but still measurable.</em>',
+  geo_pattern_fluency: 'Sentence-length sweet spot is 12 to 22 words.<br/>'
+    + '<em>Too short = telegraphic ; too long = LLM truncates.</em>',
+  geo_pattern_readability: 'Flesch Reading Ease score (60–80 = plain language).<br/>'
+    + '<em>Too dense = LLM picks an easier-to-quote source.</em>',
+  geo_pattern_vocab: 'Domain-specific terminology (depth, not jargon).<br/>'
+    + '<em>Helps LLM disambiguate the topic.</em>',
+
+  // ── Sprint 6 — Schema tab ────────────────────────────────────────────
+  schema_avg_score: 'Average schema.org structured-data score (0–100) across your cited pages.<br/>'
+    + 'Weighted blend of Organization, page-type primary schema (Article / Product / FAQPage), BreadcrumbList, and validity of existing JSON-LD blocks.',
+  schema_page_score: 'Schema.org score for this page (0–100).<br/>'
+    + '<em>Higher = more required structured-data blocks present and valid against the schema.org spec.</em>',
+  schema_missing_block: 'Recommended schema.org type for this page type that we did not detect in the page\'s JSON-LD.<br/>'
+    + '<em>Copy the generated block below into &lt;head&gt; to fix.</em>',
+  schema_existing_valid: 'A JSON-LD block of this type was found AND it has all the properties required by schema.org for its type.',
+  schema_existing_invalid: 'A JSON-LD block of this type was found BUT it is missing one or more required properties — Google flags these as red errors.',
+
+  // ── Sprint 7 — Competitor reverse-engineering ────────────────────────
+  comp_wins: 'Questions where an LLM cited this competitor and your brand was absent from the response.<br/>'
+    + '<em>Higher = they own more of your scan\'s question coverage.</em>',
+  comp_pages: 'Pages of this competitor\'s site that an LLM cited at least once during the scan.<br/>'
+    + '<em>Capped at 10 per competitor.</em>',
+  comp_geo_avg: 'Average Princeton GEO content score across this competitor\'s cited pages.<br/>'
+    + 'Measures statistics density, source citations, expert quotes, authoritative phrasing, fluency.<br/>'
+    + '<em>Higher = stronger LLM-citation magnet.</em>',
+  comp_schema_avg: 'Average schema.org structured-data score across this competitor\'s cited pages.<br/>'
+    + '<em>Measures presence of Organization, Article, Product, FAQPage, BreadcrumbList JSON-LD blocks per page type.</em>',
+  comp_geo_delta: 'Competitor avg GEO score minus your avg (from the Page Audit tab).<br/>'
+    + '<em>Above +10 they crush you · 0 to +10 they\'re ahead · below 0 you lead.</em>',
+  comp_schema_delta: 'Competitor avg schema score minus your avg (from the Schema tab).<br/>'
+    + '<em>Structured data is a strong AI-Overview ranking signal — positive deltas point at copy-pasteable JSON-LD fixes.</em>',
+  comp_wikipedia: 'This competitor has a Wikipedia page.<br/>'
+    + '<em>ChatGPT cites Wikipedia ~48% of the time, so it\'s a multiplier on their AI visibility.</em>',
+  comp_da: 'Babbar Domain Authority (0–100) for this competitor\'s domain.<br/>'
+    + '<em>Higher = stronger backlink profile. NULL when the domain isn\'t in our media_catalog yet.</em>',
+  comp_missing_schemas: 'Schema.org JSON-LD types found on this competitor\'s cited pages but absent from all your own audited pages.<br/>'
+    + '<em>Add these on your equivalent pages — direct, copy-paste-level action.</em>',
+  comp_snippet_only: 'Site blocks crawlers (Akamai / Cloudflare / similar).<br/>'
+    + 'We can\'t audit the live page, so the scores below come from the snippet the LLM used when citing this URL.<br/>'
+    + '<em>Lighter signal than a full audit — only comparable across other snippet-only rows.</em>',
+  comp_fetch_fail: 'Fetch failed (DNS error, timeout, non-HTML content, server error).<br/>'
+    + '<em>We didn\'t compute a score for this page.</em>',
+  comp_citation_count: 'Number of LLM responses in this scan that cited this exact URL.',
+  comp_audited_count: 'The 5 brands with the most LLM responses where they were mentioned and your target brand was absent.<br/>'
+    + '<em>For each, we audit up to 10 pages the LLMs actually cited.</em>',
+  comp_baseline: 'Reference values used to compute the per-competitor pattern delta.<br/>'
+    + '<em>Pulled from your Page Audit tab (avg GEO) and Schema tab (avg score) over URLs LLMs cited for your own site.</em>',
+  comp_top_label: 'The competitor with the highest <strong>wins</strong> count.<br/>'
+    + '<em>A win = an LLM cited them while your brand was absent from the response.</em>',
 };
 
 const tipText = text || TIPS[id || ''] || '';

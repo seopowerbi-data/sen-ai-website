@@ -25,6 +25,7 @@
  */
 export const prerender = false;
 import ScanResultsLayout from '../../../../layouts/ScanResultsLayout.astro';
+import Tip from '../../../../components/Tip.astro';
 
 const token = Astro.cookies.get('token')?.value;
 if (!token) return Astro.redirect('/login');
@@ -115,7 +116,9 @@ function fmtJson(obj: any): string {
     {/* Hero KPI banner */}
     <div class="grid grid-cols-1 lg:grid-cols-4 gap-4 mb-6">
       <div class="bg-white rounded-xl shadow-sm p-6 lg:col-span-2">
-        <p class="text-[11px] text-charcoal-light uppercase tracking-wide mb-2">Average schema score</p>
+        <p class="text-[11px] text-charcoal-light uppercase tracking-wide mb-2">
+          <Tip id="schema_avg_score">Average schema score</Tip>
+        </p>
         <div class="flex items-baseline gap-3">
           {summary.avg_schema_score != null ? (
             <>
@@ -220,15 +223,21 @@ function fmtJson(obj: any): string {
                   </span>
                 )}
                 {p.fetch_error && (
-                  <span class="text-[9px] px-1.5 py-0.5 rounded bg-red-50 text-red-600 shrink-0" title={p.fetch_error}>fetch failed</span>
+                  <Tip id="comp_fetch_fail">
+                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-red-50 text-red-600 shrink-0">fetch failed</span>
+                  </Tip>
                 )}
                 {p.citation_count > 0 && (
-                  <span class="text-[10px] text-charcoal-light shrink-0">{p.citation_count} cite(s)</span>
+                  <Tip id="comp_citation_count">
+                    <span class="text-[10px] text-charcoal-light shrink-0">{p.citation_count} cite(s)</span>
+                  </Tip>
                 )}
                 {p.schema_score != null && (
-                  <span class={`text-[10px] px-2 py-0.5 rounded font-semibold ${sc.bg} ${sc.text} shrink-0`}>
-                    {p.schema_score} / 100 - {sc.label}
-                  </span>
+                  <Tip id="schema_page_score">
+                    <span class={`text-[10px] px-2 py-0.5 rounded font-semibold ${sc.bg} ${sc.text} shrink-0`}>
+                      {p.schema_score} / 100 - {sc.label}
+                    </span>
+                  </Tip>
                 )}
                 <svg class="w-4 h-4 text-gray-400 shrink-0 transition-transform" :class={`expanded === '${cardKey}' ? 'rotate-180' : ''`}
                      fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -252,15 +261,17 @@ function fmtJson(obj: any): string {
                             const cls = b.valid
                               ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                               : 'bg-red-50 text-red-700 border-red-200';
-                            const title = b.valid
-                              ? 'Required fields present.'
+                            const tipText = b.valid
+                              ? `<strong>${b.type}</strong> block found.<br/><em>All required properties are present per schema.org spec.</em>`
                               : ((b.missing || []).length > 0
-                                  ? `Missing required : ${(b.missing || []).join(', ')}`
-                                  : (b.errors || []).join(' ; '));
+                                  ? `<strong>${b.type}</strong> block found but invalid.<br/>Missing required properties :<br/><em>${(b.missing || []).join(', ')}</em>`
+                                  : `<strong>${b.type || 'unknown'}</strong> block error :<br/><em>${(b.errors || []).join(' ; ')}</em>`);
                             return (
-                              <span class={`text-[10px] px-2 py-1 rounded border ${cls}`} title={title}>
-                                {b.valid ? '✓' : '!'} {b.type || 'unknown'}
-                              </span>
+                              <Tip text={tipText}>
+                                <span class={`text-[10px] px-2 py-1 rounded border ${cls}`}>
+                                  {b.valid ? '✓' : '!'} {b.type || 'unknown'}
+                                </span>
+                              </Tip>
                             );
                           })}
                         </div>
@@ -273,9 +284,11 @@ function fmtJson(obj: any): string {
                         <p class="text-[10px] uppercase tracking-wide text-charcoal-light font-semibold mb-2">Missing (recommended for this page type)</p>
                         <div class="flex flex-wrap gap-1.5">
                           {missingTypes.map((t: string) => (
-                            <span class="text-[10px] px-2 py-1 rounded bg-amber-50 text-amber-700 border border-amber-200" title={SCHEMA_META[t]?.explain || ''}>
-                              {schemaLabel(t)}
-                            </span>
+                            <Tip text={`<strong>${schemaLabel(t)}</strong> recommended for this page type but not detected.<br/><em>${SCHEMA_META[t]?.explain || 'Copy the generated block below into &lt;head&gt; to fix.'}</em>`}>
+                              <span class="text-[10px] px-2 py-1 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                                {schemaLabel(t)}
+                              </span>
+                            </Tip>
                           ))}
                         </div>
                       </div>

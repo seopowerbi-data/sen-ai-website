@@ -29,6 +29,7 @@
  */
 export const prerender = false;
 import ScanResultsLayout from '../../../../layouts/ScanResultsLayout.astro';
+import Tip from '../../../../components/Tip.astro';
 
 const token = Astro.cookies.get('token')?.value;
 if (!token) return Astro.redirect('/login');
@@ -250,7 +251,9 @@ const visibleBlocks = blocks.filter(b => b.items.length > 0);
                   )}
 
                   {b.stale && (
-                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-gray-100 text-charcoal-light shrink-0" title="Older than TTL, will be refreshed on next worker run">stale</span>
+                    <Tip text="Older than the TTL (7 days).<br/><em>Will be refreshed automatically on the next scheduled worker run, or click Refresh above to force it now.</em>">
+                      <span class="text-[9px] px-1.5 py-0.5 rounded bg-gray-100 text-charcoal-light shrink-0">stale</span>
+                    </Tip>
                   )}
 
                   <svg class="w-4 h-4 text-gray-400 shrink-0 transition-transform" :class={`expanded === '${cardKey}' ? 'rotate-180' : ''`}
@@ -324,9 +327,11 @@ const visibleBlocks = blocks.filter(b => b.items.length > 0);
                             <p class={`text-[11px] uppercase tracking-wide ${labelCls}`}>{lang}.wikipedia</p>
                             <div class="flex items-center gap-1.5">
                               {isLowConfidence && (
-                                <span class="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-amber-100 text-amber-700" title={`Title similarity ${w.title_similarity ?? '?'} - verify this page matches your brand`}>
-                                  low confidence
-                                </span>
+                                <Tip text={`Title similarity score : <strong>${w.title_similarity ?? '?'}</strong><br/><em>Verify this Wikipedia page actually matches your brand - the match is heuristic and may be wrong on common names.</em>`}>
+                                  <span class="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-amber-100 text-amber-700">
+                                    low confidence
+                                  </span>
+                                </Tip>
                               )}
                               {w.quality_score != null && (
                                 <span class={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${scoreClasses(w.quality_score).bg} ${scoreClasses(w.quality_score).text}`}>
@@ -342,14 +347,18 @@ const visibleBlocks = blocks.filter(b => b.items.length > 0);
                           {w.extract && <p class="text-xs text-charcoal-dark line-clamp-4">{w.extract}</p>}
                           <div class="flex flex-wrap items-center gap-3 mt-3 text-[10px] text-charcoal-light">
                             {w.domain_match === true && (
-                              <span class="px-1.5 py-0.5 rounded font-semibold bg-emerald-50 text-emerald-700" title="The brand's official website is linked from this Wikipedia page - strong evidence the page is the right entity.">
-                                official site linked ✓
-                              </span>
+                              <Tip text="The brand's official website is linked from this Wikipedia page.<br/><em>Strong evidence the page is the right entity, not a name collision.</em>">
+                                <span class="px-1.5 py-0.5 rounded font-semibold bg-emerald-50 text-emerald-700">
+                                  official site linked ✓
+                                </span>
+                              </Tip>
                             )}
                             {w.domain_match === false && (
-                              <span class="px-1.5 py-0.5 rounded font-semibold bg-amber-50 text-amber-700" title="The brand's known domain isn't in this page's external links - could be a name collision. Verify before trusting.">
-                                domain not linked
-                              </span>
+                              <Tip text="The brand's known domain isn't in this page's external links.<br/><em>Could be a name collision with another entity. Verify before trusting this match.</em>">
+                                <span class="px-1.5 py-0.5 rounded font-semibold bg-amber-50 text-amber-700">
+                                  domain not linked
+                                </span>
+                              </Tip>
                             )}
                             {w.references_count != null && <span>{w.references_count} external refs</span>}
                             {w.categories_count != null && <span>{w.categories_count} categories</span>}

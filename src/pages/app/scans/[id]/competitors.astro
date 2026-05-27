@@ -23,6 +23,7 @@
  */
 export const prerender = false;
 import ScanResultsLayout from '../../../../layouts/ScanResultsLayout.astro';
+import Tip from '../../../../components/Tip.astro';
 
 const token = Astro.cookies.get('token')?.value;
 if (!token) return Astro.redirect('/login');
@@ -89,27 +90,26 @@ function fmtDelta(d?: number | null) {
     {/* Hero KPI banner */}
     <div class="grid grid-cols-1 lg:grid-cols-4 gap-4 mb-6">
       <div class="bg-white rounded-xl shadow-sm p-6 lg:col-span-2">
-        <p class="text-[11px] text-charcoal-light uppercase tracking-wide mb-2 cursor-help"
-           title="The 5 brands (out of all competitors classified for this scan) with the most LLM responses where they were mentioned and your target brand was absent. For each, we audit up to 10 pages the LLMs actually cited.">
-          Competitors audited
+        <p class="text-[11px] text-charcoal-light uppercase tracking-wide mb-2">
+          <Tip id="comp_audited_count">Competitors audited</Tip>
         </p>
         <div class="flex items-baseline gap-3">
           <span class="text-3xl font-bold text-charcoal-dark">{summary.competitors_audited || 0}</span>
           <span class="text-base text-charcoal-light">{summary.pages_audited || 0} page(s) audited</span>
         </div>
         {baseline.own_page_count > 0 && (
-          <p class="text-xs text-charcoal-light mt-1 cursor-help"
-             title="Reference values used to compute the per-competitor pattern delta. Pulled from your Page Audit tab (avg GEO) and Schema tab (avg schema score) over the URLs LLMs cited for your own site.">
-            Your baseline : {baseline.own_page_count} cited pages, avg GEO {baseline.own_geo_avg ?? '-'}/100,
-            avg schema {baseline.own_schema_avg ?? '-'}/100.
+          <p class="text-xs text-charcoal-light mt-1">
+            <Tip id="comp_baseline">
+              Your baseline : {baseline.own_page_count} cited pages, avg GEO {baseline.own_geo_avg ?? '-'}/100,
+              avg schema {baseline.own_schema_avg ?? '-'}/100.
+            </Tip>
           </p>
         )}
       </div>
 
       <div class="bg-white rounded-xl shadow-sm p-6">
-        <p class="text-[11px] text-charcoal-light uppercase tracking-wide mb-2 cursor-help"
-           title="The competitor with the highest 'wins' count, where a win is a question an LLM answered citing them while your brand was absent from the response.">
-          Top competitor
+        <p class="text-[11px] text-charcoal-light uppercase tracking-wide mb-2">
+          <Tip id="comp_top_label">Top competitor</Tip>
         </p>
         {competitors.length > 0 ? (
           <>
@@ -168,25 +168,29 @@ function fmtDelta(d?: number | null) {
                     <h3 class="text-sm font-semibold text-charcoal-dark truncate">{c.brand_name}</h3>
                     <p class="text-[10px] text-charcoal-light truncate">{c.domain || 'no domain on record'}</p>
                   </div>
-                  <span class="text-[10px] px-2 py-0.5 rounded bg-sky-50 text-sky-700 shrink-0 cursor-help"
-                        title="Questions where an LLM cited this competitor and your brand was absent from the response. Higher = they own more of your scan's question coverage.">
-                    {c.winning_questions_count} win(s)
-                  </span>
-                  <span class="text-[10px] px-2 py-0.5 rounded bg-gray-100 text-charcoal-light shrink-0 cursor-help"
-                        title="Pages of this competitor's site that an LLM cited at least once during the scan. Capped at 10 per competitor.">
-                    {c.page_count} page(s)
-                  </span>
-                  {c.geo_avg != null && (
-                    <span class={`text-[10px] px-2 py-0.5 rounded font-semibold cursor-help ${geoCls.bg} ${geoCls.text} shrink-0`}
-                          title="Average Princeton GEO content score across this competitor's cited pages. Measures statistics density, source citations, expert quotes, authoritative phrasing, fluency. Higher = stronger LLM-citation magnet.">
-                      GEO {c.geo_avg}
+                  <Tip id="comp_wins">
+                    <span class="text-[10px] px-2 py-0.5 rounded bg-sky-50 text-sky-700 shrink-0">
+                      {c.winning_questions_count} win(s)
                     </span>
+                  </Tip>
+                  <Tip id="comp_pages">
+                    <span class="text-[10px] px-2 py-0.5 rounded bg-gray-100 text-charcoal-light shrink-0">
+                      {c.page_count} page(s)
+                    </span>
+                  </Tip>
+                  {c.geo_avg != null && (
+                    <Tip id="comp_geo_avg">
+                      <span class={`text-[10px] px-2 py-0.5 rounded font-semibold ${geoCls.bg} ${geoCls.text} shrink-0`}>
+                        GEO {c.geo_avg}
+                      </span>
+                    </Tip>
                   )}
                   {c.schema_avg != null && (
-                    <span class={`text-[10px] px-2 py-0.5 rounded font-semibold cursor-help ${schemaCls.bg} ${schemaCls.text} shrink-0`}
-                          title="Average schema.org structured data score across this competitor's cited pages. Measures presence of Organization, Article, Product, FAQPage, BreadcrumbList JSON-LD blocks per page type.">
-                      Schema {c.schema_avg}
-                    </span>
+                    <Tip id="comp_schema_avg">
+                      <span class={`text-[10px] px-2 py-0.5 rounded font-semibold ${schemaCls.bg} ${schemaCls.text} shrink-0`}>
+                        Schema {c.schema_avg}
+                      </span>
+                    </Tip>
                   )}
                   <svg class="w-4 h-4 text-gray-400 shrink-0 transition-transform" :class={`expanded === '${cardKey}' ? 'rotate-180' : ''`}
                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -197,34 +201,39 @@ function fmtDelta(d?: number | null) {
                 {/* Pattern delta strip */}
                 <div class="flex flex-wrap gap-2 mt-3 text-[10px]">
                   {c.delta?.geo_vs_yours != null && (
-                    <span class={`px-2 py-0.5 rounded cursor-help ${deltaGeoCls}`}
-                          title="Competitor average GEO content score minus your average across your own cited pages (from the Page Audit tab). Positive = they beat you. Above +10 = they crush you ; below 0 = you lead.">
-                      GEO delta : {fmtDelta(c.delta.geo_vs_yours)}
-                    </span>
+                    <Tip id="comp_geo_delta">
+                      <span class={`px-2 py-0.5 rounded ${deltaGeoCls}`}>
+                        GEO delta : {fmtDelta(c.delta.geo_vs_yours)}
+                      </span>
+                    </Tip>
                   )}
                   {c.delta?.schema_vs_yours != null && (
-                    <span class={`px-2 py-0.5 rounded cursor-help ${deltaSchemaCls}`}
-                          title="Competitor average schema.org score minus your average (from the Schema tab). Positive = they have more structured data than you. Structured data is a strong AI-Overview ranking signal.">
-                      Schema delta : {fmtDelta(c.delta.schema_vs_yours)}
-                    </span>
+                    <Tip id="comp_schema_delta">
+                      <span class={`px-2 py-0.5 rounded ${deltaSchemaCls}`}>
+                        Schema delta : {fmtDelta(c.delta.schema_vs_yours)}
+                      </span>
+                    </Tip>
                   )}
                   {c.wikipedia_present && (
-                    <span class="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 cursor-help"
-                          title="This competitor has a Wikipedia page. ChatGPT cites Wikipedia 48% of the time - having a page is a multiplier on AI visibility.">
-                      Wikipedia ✓
-                    </span>
+                    <Tip id="comp_wikipedia">
+                      <span class="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700">
+                        Wikipedia ✓
+                      </span>
+                    </Tip>
                   )}
                   {c.backlinks?.da != null && (
-                    <span class="px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 cursor-help"
-                          title="Babbar Domain Authority (0-100). Higher = stronger backlink profile, which LLMs use indirectly via cached training data. NULL when this competitor's domain isn't in our media_catalog yet.">
-                      DA {c.backlinks.da}
-                    </span>
+                    <Tip id="comp_da">
+                      <span class="px-2 py-0.5 rounded bg-indigo-50 text-indigo-700">
+                        DA {c.backlinks.da}
+                      </span>
+                    </Tip>
                   )}
                   {newSchemas.length > 0 && (
-                    <span class="px-2 py-0.5 rounded bg-red-50 text-red-700 cursor-help"
-                          title={`Schema.org JSON-LD types found on this competitor's cited pages but absent from all your own audited pages : ${newSchemas.join(', ')}. Adding these structured-data blocks on your equivalent pages is a direct, copy-paste-level action.`}>
-                      Missing schemas : {newSchemas.slice(0, 3).join(', ')}{newSchemas.length > 3 ? ` +${newSchemas.length - 3}` : ''}
-                    </span>
+                    <Tip id="comp_missing_schemas">
+                      <span class="px-2 py-0.5 rounded bg-red-50 text-red-700">
+                        Missing schemas : {newSchemas.slice(0, 3).join(', ')}{newSchemas.length > 3 ? ` +${newSchemas.length - 3}` : ''}
+                      </span>
+                    </Tip>
                   )}
                 </div>
               </div>
@@ -277,34 +286,37 @@ function fmtDelta(d?: number | null) {
                             <p class="text-[10px] text-charcoal-light truncate">{pathOnly}</p>
                           </div>
                           {p.fetch_error && p.audit_source === 'contexte' && (
-                            <span class="text-[9px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 shrink-0 cursor-help"
-                                  title="Site blocks crawlers (Akamai / Cloudflare / similar). We can't audit the live page, so the scores below come from the snippet the LLM used when citing this URL - lighter signal than a full page audit. Reported word count reflects the snippet, not the page.">
-                              snippet-only
-                            </span>
+                            <Tip id="comp_snippet_only">
+                              <span class="text-[9px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 shrink-0">
+                                snippet-only
+                              </span>
+                            </Tip>
                           )}
                           {p.fetch_error && p.audit_source !== 'contexte' && (
-                            <span class="text-[9px] px-1.5 py-0.5 rounded bg-red-50 text-red-600 shrink-0 cursor-help"
-                                  title={`Fetch failed - ${p.fetch_error}. Common causes : DNS error, timeout, non-HTML content. We didn't compute a score for this page.`}>fetch fail</span>
+                            <Tip id="comp_fetch_fail">
+                              <span class="text-[9px] px-1.5 py-0.5 rounded bg-red-50 text-red-600 shrink-0">fetch fail</span>
+                            </Tip>
                           )}
                           {p.citation_count > 0 && (
-                            <span class="text-[10px] text-charcoal-light shrink-0 cursor-help"
-                                  title="Number of LLM responses in this scan that cited this exact URL.">
-                              {p.citation_count} cite(s)
-                            </span>
+                            <Tip id="comp_citation_count">
+                              <span class="text-[10px] text-charcoal-light shrink-0">
+                                {p.citation_count} cite(s)
+                              </span>
+                            </Tip>
                           )}
                           {p.geo_score != null && (
-                            <span class={`text-[10px] px-2 py-0.5 rounded font-semibold cursor-help ${pgeo.bg} ${pgeo.text} shrink-0`}
-                                  title={p.audit_source === 'contexte'
-                                    ? 'Princeton GEO score (0-100) derived from the LLM snippet, not the full page. Best read as relative across snippet-only rows, not vs full-audit pages.'
-                                    : 'Princeton GEO content score (0-100). Weighted blend of statistics, source citations, expert quotes, authoritative phrasing, fluency. Aggarwal et al., KDD 2024.'}>
-                              GEO {p.geo_score}
-                            </span>
+                            <Tip id={p.audit_source === 'contexte' ? 'geo_page_score_contexte' : 'geo_page_score'}>
+                              <span class={`text-[10px] px-2 py-0.5 rounded font-semibold ${pgeo.bg} ${pgeo.text} shrink-0`}>
+                                GEO {p.geo_score}
+                              </span>
+                            </Tip>
                           )}
                           {p.schema_score != null && (
-                            <span class={`text-[10px] px-2 py-0.5 rounded font-semibold cursor-help ${pschema.bg} ${pschema.text} shrink-0`}
-                                  title="Schema.org structured data score (0-100). Weighted blend of Organization, page-type primary schema (Article / Product / FAQPage), BreadcrumbList, and validity of existing blocks against required properties.">
-                              S {p.schema_score}
-                            </span>
+                            <Tip id="schema_page_score">
+                              <span class={`text-[10px] px-2 py-0.5 rounded font-semibold ${pschema.bg} ${pschema.text} shrink-0`}>
+                                S {p.schema_score}
+                              </span>
+                            </Tip>
                           )}
                         </div>
                         {validSchemas.length > 0 && (

@@ -19,6 +19,7 @@
  */
 export const prerender = false;
 import ScanResultsLayout from '../../../../layouts/ScanResultsLayout.astro';
+import Tip from '../../../../components/Tip.astro';
 
 const token = Astro.cookies.get('token')?.value;
 if (!token) return Astro.redirect('/login');
@@ -98,7 +99,9 @@ const topIssues = Object.entries(summary.issues_by_pattern || {})
     {/* Hero KPI banner */}
     <div class="grid grid-cols-1 lg:grid-cols-4 gap-4 mb-6">
       <div class="bg-white rounded-xl shadow-sm p-6 lg:col-span-2">
-        <p class="text-[11px] text-charcoal-light uppercase tracking-wide mb-2">Average GEO score</p>
+        <p class="text-[11px] text-charcoal-light uppercase tracking-wide mb-2">
+          <Tip id="geo_avg_score">Average GEO score</Tip>
+        </p>
         <div class="flex items-baseline gap-3">
           {summary.avg_geo_score != null ? (
             <>
@@ -185,15 +188,21 @@ const topIssues = Object.entries(summary.issues_by_pattern || {})
                   <p class="text-[10px] text-charcoal-light truncate">{pathOnly}</p>
                 </div>
                 {p.fetch_error && (
-                  <span class="text-[9px] px-1.5 py-0.5 rounded bg-red-50 text-red-600 shrink-0" title={p.fetch_error}>fetch failed</span>
+                  <Tip id="comp_fetch_fail">
+                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-red-50 text-red-600 shrink-0">fetch failed</span>
+                  </Tip>
                 )}
                 {p.citation_count > 0 && (
-                  <span class="text-[10px] text-charcoal-light shrink-0">{p.citation_count} cite(s)</span>
+                  <Tip id="comp_citation_count">
+                    <span class="text-[10px] text-charcoal-light shrink-0">{p.citation_count} cite(s)</span>
+                  </Tip>
                 )}
                 {p.geo_score != null && (
-                  <span class={`text-[10px] px-2 py-0.5 rounded font-semibold ${sc.bg} ${sc.text} shrink-0`}>
-                    {p.geo_score} / 100 - {sc.label}
-                  </span>
+                  <Tip id="geo_page_score">
+                    <span class={`text-[10px] px-2 py-0.5 rounded font-semibold ${sc.bg} ${sc.text} shrink-0`}>
+                      {p.geo_score} / 100 - {sc.label}
+                    </span>
+                  </Tip>
                 )}
                 <svg class="w-4 h-4 text-gray-400 shrink-0 transition-transform" :class={`expanded === '${cardKey}' ? 'rotate-180' : ''`}
                      fill="none" stroke="currentColor" viewBox="0 0 24 24">
