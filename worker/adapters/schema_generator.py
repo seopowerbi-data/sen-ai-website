@@ -33,25 +33,51 @@ logger = logging.getLogger(__name__)
 
 # URL path hints. Multi-lingual to cover FR + EN content. We check these in
 # order and the first match wins.
-PATH_HINTS: tuple[tuple[str, str], ...] = (
-    ("faq", "faq"),
-    ("questions-frequentes", "faq"),
-    ("foire-aux-questions", "faq"),
-    ("a-propos", "about"),
-    ("about", "about"),
-    ("qui-sommes-nous", "about"),
-    ("blog", "article"),
-    ("article", "article"),
-    ("actualites", "article"),
-    ("news", "article"),
-    ("conseils", "article"),
-    ("dossier", "article"),
-    ("expertise", "article"),
-    ("produit", "product"),
-    ("product", "product"),
-    ("shop", "product"),
-    ("boutique", "product"),
-)
+# Segment-based path hints. We classify by EXACT path segment match (split
+# on `/`) rather than substring. Substring matching gave false positives
+# (`/a-propos-news` matching "news") and false negatives (Ducray's `/p/`
+# prefix not matching "product"). Segment match is sharper and cheap.
+PRODUCT_SEGMENTS: frozenset[str] = frozenset({
+    "p", "produit", "produits", "product", "products",
+    "shop", "boutique", "store", "collection", "collections",
+})
+ARTICLE_SEGMENTS: frozenset[str] = frozenset({
+    "blog", "blogs", "article", "articles",
+    "actualites", "actualite", "news",
+    "conseils", "conseil", "dossier", "dossiers",
+    "expertise", "press", "magazine",
+})
+FAQ_SEGMENTS: frozenset[str] = frozenset({
+    "faq", "faqs", "questions", "questions-frequentes",
+    "foire-aux-questions", "help", "aide",
+})
+ABOUT_SEGMENTS: frozenset[str] = frozenset({
+    "about", "a-propos", "qui-sommes-nous", "notre-histoire", "notre-mission",
+})
+
+# Locale path segments to skip both in classification and in breadcrumb
+# generation. /en/, /fr/, /fr-ch/, /pt-br/ are language switchers, not
+# navigation steps - they pollute the BreadcrumbList and confuse the
+# classifier. Two letters with optional region (ISO 639-1 + ISO 3166-1).
+_LOCALE_RE = re.compile(r"^[a-z]{2}(-[a-z]{2,3})?$")
+
+# Segments that exist as URL technicality but aren't real nav steps for the
+# user. "p" = Ducray product prefix, "c" = some e-commerce category, "u" =
+# user profile prefix on a few sites. We keep them for page-type detection
+# (they're meaningful as "this is a product page") but skip them from the
+# generated BreadcrumbList.
+_PREFIX_ONLY_SEGMENTS: frozenset[str] = frozenset({"p", "c", "u"})
+
+
+def _is_locale(seg: str) -> bool:
+    return bool(_LOCALE_RE.match(seg.lower()))
+
+
+def _nav_segments(path: str) -> list[str]:
+    """Path segments stripped of locale prefixes. Used for both
+    classification and breadcrumb generation."""
+    segments = [s for s in (path or "").split("/") if s]
+    return [s for s in segments if not _is_locale(s)]
 
 
 def detect_page_type(url: str, html: str | None, soup: BeautifulSoup | None) -> str:
@@ -66,9 +92,26 @@ def detect_page_type(url: str, html: str | None, soup: BeautifulSoup | None) -> 
     if path in ("", "/"):
         return "homepage"
 
-    for needle, ptype in PATH_HINTS:
-        if needle in path:
-            return ptype
+    nav = _nav_segments(path)
+    if not nav:
+        # All segments were locale codes (e.g. /en/) - treat as homepage.
+        return "homepage"
+
+    # FAQ / about / article checks first - they're more specific than
+    # product (a /blog/product-review is article, not product).
+    for seg in nav:
+        if seg in FAQ_SEGMENTS:
+            return "faq"
+        if seg in ABOUT_SEGMENTS:
+            return "about"
+        if seg in ARTICLE_SEGMENTS:
+            return "article"
+    # Product : only credit if the keyword segment is NOT the last (a bare
+    # `/p` or `/products` is a category landing ; `/p/<slug>` is the real
+    # product page). We accept either for v1 - both deserve Product schema.
+    for seg in nav:
+        if seg in PRODUCT_SEGMENTS:
+            return "product"
 
     if soup is not None:
         # FAQ : at least 3 consecutive question/answer DOM patterns.
@@ -269,32 +312,85 @@ def _gen_website(url: str, soup: BeautifulSoup | None, brief: dict, scan_domain:
     }
 
 
+# Trailing-token strippers for breadcrumb name humanization. Real Ducray
+# URL : /en/p/dexyane-med-soothing-repair-cream-3282770073355-5e13c847
+# We want : "Dexyane Med Soothing Repair Cream" not "Dexyane med soothing
+# repair cream 3282770073355 5e13c847".
+_SKU_DIGITS_RE = re.compile(r"^\d{6,}$")           # all-digits, 6+ chars = SKU/EAN
+_SHORT_HASH_RE = re.compile(r"^(?=.*\d)(?=.*[a-f])[0-9a-f]{6,12}$")  # mixed hex hash
+
+
+def _humanize_slug(slug: str) -> str:
+    """URL slug -> human-readable breadcrumb name. Strips trailing SKU /
+    hash tokens, title-cases each remaining word. Falls back to the raw
+    slug if everything got stripped."""
+    tokens = [t for t in re.split(r"[-_]+", slug) if t]
+    if not tokens:
+        return slug
+
+    # Walk from the right and drop SKU / hash trailers. We stop the trim
+    # at the first non-SKU token so embedded numbers in product names
+    # (e.g. "vitamin-c-10") are kept.
+    while tokens and (_SKU_DIGITS_RE.match(tokens[-1].lower()) or _SHORT_HASH_RE.match(tokens[-1].lower())):
+        tokens.pop()
+
+    if not tokens:
+        return slug  # everything was numeric - fall back
+
+    # Title-case each remaining token. Preserve all-caps tokens up to 4 chars
+    # (e.g. "med" stays "MED" if the slug had it caps - but URL slugs are
+    # always lowercased, so this branch is conservative).
+    out: list[str] = []
+    for tok in tokens:
+        if len(tok) <= 1:
+            out.append(tok.upper())
+        else:
+            out.append(tok[0].upper() + tok[1:].lower())
+    return " ".join(out)
+
+
 def _gen_breadcrumb(url: str, soup: BeautifulSoup | None) -> dict | None:
     p = urlparse(url)
     if not p.scheme or not p.netloc:
         return None
-    segments = [s for s in (p.path or "").split("/") if s]
-    if not segments:
+    raw_segments = [s for s in (p.path or "").split("/") if s]
+    if not raw_segments:
         return None
 
+    # Walk raw segments to build the cumulative URL, but skip locale and
+    # URL-prefix-only segments from the user-visible BreadcrumbList. We
+    # still extend the cumulative path so the `item` field stays accurate.
     root = f"{p.scheme}://{p.netloc}"
-    items = [{
+    items: list[dict[str, Any]] = [{
         "@type": "ListItem",
         "position": 1,
         "name": "Home",
         "item": root + "/",
     }]
     accum = ""
-    for i, seg in enumerate(segments, start=2):
+    position = 2
+    for seg in raw_segments:
         accum += "/" + seg
+        if _is_locale(seg):
+            continue
+        if seg.lower() in _PREFIX_ONLY_SEGMENTS:
+            continue
+        name = _humanize_slug(seg)
+        if not name:
+            continue
         items.append({
             "@type": "ListItem",
-            "position": i,
-            # Humanise the slug : decode percent-escapes elsewhere ; for v1
-            # we just hyphen-to-space + title-case.
-            "name": seg.replace("-", " ").replace("_", " ").strip().capitalize(),
+            "position": position,
+            "name": name,
             "item": root + accum,
         })
+        position += 1
+
+    # If after filtering we end up with only the Home entry, don't emit a
+    # BreadcrumbList - it adds zero value and Google flags it as thin.
+    if len(items) < 2:
+        return None
+
     return {
         "@context": _SCHEMA_CONTEXT,
         "@type": "BreadcrumbList",
