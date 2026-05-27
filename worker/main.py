@@ -117,7 +117,8 @@ def load_handlers():
                           suggest_media,
                           measure_publish_outcome,
                           check_brand_wikipedia,
-                          audit_scan_pages)  # noqa: F401
+                          audit_scan_pages,
+                          audit_scan_schemas)  # noqa: F401
     HANDLERS["fetch_keywords"] = fetch_keywords.execute
     HANDLERS["classify_topics"] = classify_topics.execute
     HANDLERS["assign_keywords"] = assign_keywords.execute
@@ -148,6 +149,7 @@ def load_handlers():
     HANDLERS["measure_publish_outcome"] = measure_publish_outcome.execute
     HANDLERS["check_brand_wikipedia"] = check_brand_wikipedia.execute
     HANDLERS["audit_scan_pages"] = audit_scan_pages.execute
+    HANDLERS["audit_scan_schemas"] = audit_scan_schemas.execute
 
 
 # Job types that operate on a single content item (one FAQ / article / …)

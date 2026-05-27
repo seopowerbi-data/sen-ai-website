@@ -1,0 +1,338 @@
+---
+/**
+ * Schema audit - Sprint 6 (schema.org / JSON-LD generator).
+ *
+ * Surfaces, for each page of the user's site cited by an LLM during the
+ * scan : existing JSON-LD blocks (with validation status), the schemas
+ * that should be on the page given its type, and ready-to-paste generated
+ * blocks for the missing ones.
+ *
+ * Data source : GET /api/scans/{id}/schema-audit
+ * Refresh    : POST /api/scans/{id}/schema-audit/refresh?reset=true
+ *
+ * Laws of UX :
+ *  - Peak-End : single hero number (avg schema score) + biggest missing
+ *    schema chip ("FAQPage missing on N pages").
+ *  - Aesthetic-Usability : 3-color score gauge (red / amber / emerald).
+ *  - Jakob : same expandable card pattern as audit.astro.
+ *  - Doherty : Refresh enqueues + reloads after a short wait.
+ *  - Miller : top 30 worst pages, "show all" toggle below.
+ *  - Von Restorff : missing-schema chips in amber, valid in emerald, broken
+ *    in red. The Copy button uses the coral primary CTA color.
+ *
+ * Natural writing : no em-dashes anywhere (use ' - '), no LLM tells in copy.
+ * Cf. feedback_no_em_dash.md + feedback_natural_writing.
+ */
+export const prerender = false;
+import ScanResultsLayout from '../../../../layouts/ScanResultsLayout.astro';
+
+const token = Astro.cookies.get('token')?.value;
+if (!token) return Astro.redirect('/login');
+const scanId = Astro.params.id as string;
+
+const headers = { Cookie: `token=${token}` };
+let data: any = null;
+try {
+  const res = await fetch(`http://api:8000/api/scans/${scanId}/schema-audit`, { headers });
+  if (res.ok) data = await res.json();
+} catch (_) {}
+
+const pages: any[] = data?.pages || [];
+const summary = data?.summary || {};
+const lastFetched = data?.last_fetched;
+
+function timeAgo(iso?: string): string {
+  if (!iso) return 'never';
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return 'never';
+  const mins = Math.round((Date.now() - t) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  if (days < 14) return `${days}d ago`;
+  return new Date(iso).toISOString().slice(0, 10);
+}
+
+function scoreClasses(score?: number | null) {
+  if (score == null) return { bg: 'bg-gray-100', text: 'text-charcoal-light', label: 'n/a' };
+  if (score >= 70) return { bg: 'bg-emerald-100', text: 'text-emerald-700', label: 'strong' };
+  if (score >= 40) return { bg: 'bg-amber-100', text: 'text-amber-700', label: 'partial' };
+  return { bg: 'bg-red-100', text: 'text-red-700', label: 'weak' };
+}
+
+// Schema metadata - human label and 1-line explanation. Anchored vocabulary
+// so the user can map our chips to their content team's checklist.
+const SCHEMA_META: Record<string, { label: string; explain: string }> = {
+  Organization:    { label: 'Organization',    explain: 'Brand identity block. Required on every page for Google entity recognition.' },
+  WebSite:         { label: 'WebSite',         explain: 'Top-level site descriptor. Lives on the homepage. Enables sitelink searchbox.' },
+  BreadcrumbList:  { label: 'BreadcrumbList',  explain: 'Page hierarchy. Required for the breadcrumb rich result and helps LLMs read your site structure.' },
+  Article:         { label: 'Article',         explain: 'Editorial content. Drives headline, author, publish date in AI answers.' },
+  Product:         { label: 'Product',         explain: 'Product page descriptor. Lifts AI extraction of name, price, brand.' },
+  FAQPage:         { label: 'FAQPage',         explain: 'Q/A block. Heavy lift for AI Overviews and ChatGPT answers.' },
+  NewsArticle:     { label: 'NewsArticle',     explain: 'News-specific Article variant. Same required fields.' },
+  BlogPosting:     { label: 'BlogPosting',     explain: 'Blog-specific Article variant.' },
+  Offer:           { label: 'Offer',           explain: 'Price + currency descriptor, nested in Product.' },
+  Person:          { label: 'Person',          explain: 'Author or expert block.' },
+};
+
+function schemaLabel(t: string): string {
+  return SCHEMA_META[t]?.label || t;
+}
+
+// Most-missing schema across the scan. Used for the hero chip ("FAQPage
+// missing on 14 pages") - Peak-End surface, single most actionable insight.
+const missingByType: Record<string, number> = summary.missing_by_type || {};
+const topMissing = Object.entries(missingByType).sort((a: any, b: any) => b[1] - a[1])[0];
+
+// Page-type distribution for the secondary KPI strip.
+const byPageType: Record<string, number> = summary.by_page_type || {};
+
+// Helpful tags per page_type so the user understands what we expected.
+function pageTypeChipClass(t?: string): string {
+  if (!t) return 'bg-gray-100 text-charcoal-light';
+  return 'bg-sky-50 text-sky-700';
+}
+
+// Format a JSON-LD block for the <pre> output. Pretty-printed with 2-space
+// indent so the user can paste it without reformatting.
+function fmtJson(obj: any): string {
+  try { return JSON.stringify(obj, null, 2); } catch (_) { return String(obj); }
+}
+---
+
+<ScanResultsLayout scanId={scanId} activeTab="schema">
+  <div x-data="{ expanded: null, refreshing: false, viewAll: false, copied: null }">
+
+    <p class="text-sm text-charcoal-light mb-6">
+      Structured data audit of the URLs the LLMs already cite for your site.
+      We extract existing JSON-LD blocks, validate them, detect what each
+      page is about, and generate the missing schema.org blocks - ready
+      to paste in your page's head. Free of any LLM cost.
+    </p>
+
+    {/* Hero KPI banner */}
+    <div class="grid grid-cols-1 lg:grid-cols-4 gap-4 mb-6">
+      <div class="bg-white rounded-xl shadow-sm p-6 lg:col-span-2">
+        <p class="text-[11px] text-charcoal-light uppercase tracking-wide mb-2">Average schema score</p>
+        <div class="flex items-baseline gap-3">
+          {summary.avg_schema_score != null ? (
+            <>
+              <span class={`text-3xl font-bold ${scoreClasses(summary.avg_schema_score).text}`}>
+                {summary.avg_schema_score}
+              </span>
+              <span class="text-base text-charcoal-light">/ 100 across {summary.succeeded} page(s)</span>
+            </>
+          ) : (
+            <span class="text-base text-charcoal-light">No pages audited yet.</span>
+          )}
+        </div>
+        {summary.failed > 0 && (
+          <p class="text-xs text-amber-700 mt-1">{summary.failed} page(s) failed to fetch.</p>
+        )}
+      </div>
+
+      <div class="bg-white rounded-xl shadow-sm p-6">
+        <p class="text-[11px] text-charcoal-light uppercase tracking-wide mb-2">Biggest gap</p>
+        {topMissing ? (
+          <>
+            <p class="text-sm font-semibold text-charcoal-dark">{schemaLabel(topMissing[0])}</p>
+            <p class="text-xs text-charcoal-light mt-1">missing on {topMissing[1]} page(s)</p>
+            {SCHEMA_META[topMissing[0]]?.explain && (
+              <p class="text-[10px] text-charcoal-light mt-2 leading-tight">{SCHEMA_META[topMissing[0]].explain}</p>
+            )}
+          </>
+        ) : (
+          <p class="text-sm text-charcoal-light mt-2">Nothing flagged yet.</p>
+        )}
+      </div>
+
+      <div class="bg-white rounded-xl shadow-sm p-6 flex flex-col justify-between">
+        <div>
+          <p class="text-[11px] text-charcoal-light uppercase tracking-wide mb-2">Last audit</p>
+          <p class="text-sm text-charcoal-dark">{timeAgo(lastFetched)}</p>
+          <p class="text-[10px] text-charcoal-light mt-1">Free of any LLM cost.</p>
+        </div>
+        <button
+          @click={`if (refreshing) return; refreshing = true; fetch('/api/scans/${scanId}/schema-audit/refresh?reset=true', { method: 'POST' }).then(r => r.json()).then(_ => { setTimeout(() => location.reload(), 6000); }).catch(() => { refreshing = false; });`}
+          :disabled="refreshing"
+          class="mt-3 px-3 py-1.5 text-xs font-medium rounded-lg bg-coral text-white hover:bg-coral-dark disabled:bg-gray-300 transition-colors"
+        >
+          <span x-show="!refreshing">Refresh audit</span>
+          <span x-show="refreshing">Running audit...</span>
+        </button>
+      </div>
+    </div>
+
+    {/* Page-type distribution strip */}
+    {Object.keys(byPageType).length > 0 && (
+      <div class="flex flex-wrap gap-2 mb-6 text-[11px] text-charcoal-light">
+        {Object.entries(byPageType).map(([t, n]: any) => (
+          <span class={`px-2 py-1 rounded ${pageTypeChipClass(t)}`}>
+            {t} : {n}
+          </span>
+        ))}
+      </div>
+    )}
+
+    {pages.length === 0 && (
+      <div class="bg-amber-50 border border-amber-200 rounded-xl p-6 text-sm text-amber-800">
+        No pages audited yet. Click <strong>Refresh audit</strong> above. The handler
+        will fetch every URL of your site cited at least once by an LLM during this
+        scan (~1 to 2 seconds per page), parse existing JSON-LD blocks, detect the
+        page type, and generate the missing schema.org blocks. Free of any LLM
+        cost, deterministic, idempotent.
+      </div>
+    )}
+
+    {pages.length > 0 && (
+      <div class="space-y-2">
+        <div class="flex items-end justify-between mb-2">
+          <h3 class="text-[10px] uppercase tracking-wide text-charcoal-light font-semibold">
+            Pages cited by AI <span class="text-charcoal-light/70 font-normal normal-case">- worst structured-data score first</span>
+          </h3>
+          <span class="text-[11px] text-charcoal-light">{summary.audited} audited</span>
+        </div>
+
+        {pages.slice(0, 30).map((p, pi) => {
+          const sc = scoreClasses(p.schema_score);
+          const cardKey = `p${pi}`;
+          let pathOnly = p.url;
+          try { pathOnly = new URL(p.url).pathname || '/'; } catch (_) {}
+          const existingTypes: string[] = (p.existing_schemas || []).map((b: any) => b.type).filter(Boolean);
+          const missingTypes: string[] = p.missing_schemas || [];
+          const generated: Record<string, any> = p.generated_blocks || {};
+          return (
+            <div class="bg-white rounded-xl shadow-sm overflow-hidden">
+              <div class="px-6 py-3 cursor-pointer hover:bg-gray-50 transition-colors flex items-center gap-3"
+                   @click={`expanded = expanded === '${cardKey}' ? null : '${cardKey}'`}>
+                <span class="text-[11px] text-charcoal-light w-6 text-right shrink-0">{pi + 1}</span>
+                <div class="flex-1 min-w-0">
+                  <a href={p.url} target="_blank" rel="noopener noreferrer" class="text-sm text-charcoal-dark hover:underline truncate block" @click.stop title={p.url}>
+                    {p.title || pathOnly}
+                  </a>
+                  <p class="text-[10px] text-charcoal-light truncate">{pathOnly}</p>
+                </div>
+                {p.page_type && (
+                  <span class={`text-[9px] px-1.5 py-0.5 rounded shrink-0 ${pageTypeChipClass(p.page_type)}`}>
+                    {p.page_type}
+                  </span>
+                )}
+                {p.fetch_error && (
+                  <span class="text-[9px] px-1.5 py-0.5 rounded bg-red-50 text-red-600 shrink-0" title={p.fetch_error}>fetch failed</span>
+                )}
+                {p.citation_count > 0 && (
+                  <span class="text-[10px] text-charcoal-light shrink-0">{p.citation_count} cite(s)</span>
+                )}
+                {p.schema_score != null && (
+                  <span class={`text-[10px] px-2 py-0.5 rounded font-semibold ${sc.bg} ${sc.text} shrink-0`}>
+                    {p.schema_score} / 100 - {sc.label}
+                  </span>
+                )}
+                <svg class="w-4 h-4 text-gray-400 shrink-0 transition-transform" :class={`expanded === '${cardKey}' ? 'rotate-180' : ''`}
+                     fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                </svg>
+              </div>
+
+              <div x-show={`expanded === '${cardKey}'`} x-transition class="border-t border-gray-100 px-6 py-4 bg-gray-50/30">
+                {p.fetch_error ? (
+                  <p class="text-xs text-red-700">Fetch failed : {p.fetch_error}</p>
+                ) : (
+                  <>
+                    {/* Existing blocks */}
+                    <div class="mb-4">
+                      <p class="text-[10px] uppercase tracking-wide text-charcoal-light font-semibold mb-2">Existing structured data</p>
+                      {existingTypes.length === 0 ? (
+                        <p class="text-xs text-charcoal-light italic">No JSON-LD blocks detected on this page.</p>
+                      ) : (
+                        <div class="flex flex-wrap gap-1.5">
+                          {(p.existing_schemas || []).map((b: any, bi: number) => {
+                            const cls = b.valid
+                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                              : 'bg-red-50 text-red-700 border-red-200';
+                            const title = b.valid
+                              ? 'Required fields present.'
+                              : ((b.missing || []).length > 0
+                                  ? `Missing required : ${(b.missing || []).join(', ')}`
+                                  : (b.errors || []).join(' ; '));
+                            return (
+                              <span class={`text-[10px] px-2 py-1 rounded border ${cls}`} title={title}>
+                                {b.valid ? '✓' : '!'} {b.type || 'unknown'}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Missing schemas */}
+                    {missingTypes.length > 0 && (
+                      <div class="mb-4">
+                        <p class="text-[10px] uppercase tracking-wide text-charcoal-light font-semibold mb-2">Missing (recommended for this page type)</p>
+                        <div class="flex flex-wrap gap-1.5">
+                          {missingTypes.map((t: string) => (
+                            <span class="text-[10px] px-2 py-1 rounded bg-amber-50 text-amber-700 border border-amber-200" title={SCHEMA_META[t]?.explain || ''}>
+                              {schemaLabel(t)}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Generated blocks - copy-pasteable */}
+                    {Object.keys(generated).length > 0 && (
+                      <div>
+                        <p class="text-[10px] uppercase tracking-wide text-charcoal-light font-semibold mb-2">Generated JSON-LD (ready to paste in &lt;head&gt;)</p>
+                        <div class="space-y-3">
+                          {Object.entries(generated).map(([type, block]: any) => {
+                            const copyKey = `${cardKey}-${type}`;
+                            const blockJson = fmtJson(block);
+                            const fullSnippet = '<script type="application/ld+json">\n' + blockJson + '\n</script>';
+                            const snippetLiteral = JSON.stringify(fullSnippet);
+                            const clickExpr = `navigator.clipboard.writeText(${snippetLiteral}); copied = '${copyKey}'; setTimeout(() => { if (copied === '${copyKey}') copied = null; }, 1800);`;
+                            return (
+                              <div class="bg-white rounded-lg border border-gray-200">
+                                <div class="px-3 py-2 flex items-center justify-between border-b border-gray-100">
+                                  <div class="flex items-center gap-2">
+                                    <span class="text-xs font-semibold text-charcoal-dark">{schemaLabel(type)}</span>
+                                    {SCHEMA_META[type]?.explain && (
+                                      <span class="text-[10px] text-charcoal-light">{SCHEMA_META[type].explain}</span>
+                                    )}
+                                  </div>
+                                  <button
+                                    @click={clickExpr}
+                                    class="text-[10px] px-2 py-1 rounded bg-coral text-white hover:bg-coral-dark transition-colors"
+                                  >
+                                    <span x-show={`copied !== '${copyKey}'`}>Copy</span>
+                                    <span x-show={`copied === '${copyKey}'`}>Copied</span>
+                                  </button>
+                                </div>
+                                <pre class="text-[10px] text-charcoal-dark p-3 overflow-x-auto leading-snug">{blockJson}</pre>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {existingTypes.length > 0 && missingTypes.length === 0 && Object.keys(generated).length === 0 && (
+                      <p class="text-xs text-emerald-700">All recommended schemas for this page type are in place.</p>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })}
+        {pages.length > 30 && (
+          <p class="text-xs text-charcoal-light text-center py-3">
+            +{pages.length - 30} more pages audited. Worst scores shown first - keep clicking through if you want the rest.
+          </p>
+        )}
+      </div>
+    )}
+
+  </div>
+</ScanResultsLayout>

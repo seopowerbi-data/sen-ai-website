@@ -290,6 +290,32 @@ class ScanPageAudit(Base):
     __table_args__ = (UniqueConstraint("scan_id", "url", name="uq_scan_page_audits_scan_url"),)
 
 
+class ScanSchemaAudit(Base):
+    """Sprint 6 (migration 048) - schema.org / JSON-LD audit + generator
+    per cited page. One row per (scan, url) where url is a page of the
+    user's own site cited by at least one LLM. PARITÉ obligatoire avec
+    worker/models.py.
+    """
+    __tablename__ = "scan_schema_audits"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False)
+    url = Column(Text, nullable=False)
+    title = Column(Text)
+    page_type = Column(Text)
+    fetched_at = Column(DateTime, default=datetime.utcnow)
+    fetch_status = Column(Integer)
+    fetch_error = Column(Text)
+    existing_schemas = Column(JSONB, nullable=False, default=list)
+    missing_schemas = Column(ARRAY(Text), nullable=False, default=list)
+    generated_blocks = Column(JSONB, nullable=False, default=dict)
+    schema_score = Column(Integer)
+    citation_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("scan_id", "url", name="uq_scan_schema_audits_scan_url"),)
+
+
 class ClientBrandPage(Base):
     """Sitemap-discovered page for a client_brand domain.
 

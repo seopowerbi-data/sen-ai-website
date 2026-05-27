@@ -26,7 +26,7 @@ import { fetchScanHeader } from '../lib/scan-header';
 
 interface Props {
   scanId: string;
-  activeTab: 'overview' | 'topics' | 'personas' | 'questions' | 'citations' | 'wikipedia' | 'audit' | 'actions';
+  activeTab: 'overview' | 'topics' | 'personas' | 'questions' | 'citations' | 'wikipedia' | 'audit' | 'schema' | 'actions';
 }
 
 const { scanId, activeTab } = Astro.props;
@@ -63,7 +63,7 @@ const rootScanId = runs.length > 0 ? (runs[0]?.id || scanId) : scanId;
 const tabLabels: Record<string, string> = {
   overview: 'Overview', topics: 'Topics', personas: 'Personas',
   questions: 'Questions', citations: 'Citations', wikipedia: 'Wikipedia',
-  audit: 'Page Audit', actions: 'Actions',
+  audit: 'Page Audit', schema: 'Schema', actions: 'Actions',
 };
 
 // Derive current tab path for date picker links

@@ -14,7 +14,7 @@
  */
 interface Props {
   scanId: string;
-  activeTab: 'overview' | 'topics' | 'personas' | 'questions' | 'citations' | 'wikipedia' | 'audit' | 'actions';
+  activeTab: 'overview' | 'topics' | 'personas' | 'questions' | 'citations' | 'wikipedia' | 'audit' | 'schema' | 'actions';
   counts?: {
     topics?: number;
     personas?: number;
@@ -23,6 +23,7 @@ interface Props {
     actions?: number;
     wikipedia?: number;
     audit?: number;
+    schema?: number;
   };
   criticalCount?: number;
   queryString?: string;
@@ -38,6 +39,7 @@ const tabs = [
   { id: 'citations', label: 'Citations', href: 'citations', badge: counts.citations || null },
   { id: 'wikipedia', label: 'Wikipedia', href: 'wikipedia', badge: counts.wikipedia || null },
   { id: 'audit', label: 'Page Audit', href: 'audit', badge: counts.audit || null },
+  { id: 'schema', label: 'Schema', href: 'schema', badge: counts.schema || null },
   { id: 'actions', label: 'Actions', href: 'actions', badge: criticalCount > 0 ? criticalCount : (counts.actions || null) },
 ];
 ---

@@ -12,7 +12,7 @@ from models import (
     Scan, ScanKeyword, ScanTopic, ScanPersona, ScanQuestion, ScanLLMResult,
     ScanQuestionJudgment,
     ScanBrandClassification, ScanBrandTopic, ScanOpportunity, ClientBrand,
-    ScanPageAudit,
+    ScanPageAudit, ScanSchemaAudit,
     Client,
     Job, UserClient, get_db,
 )
@@ -3371,6 +3371,97 @@ async def refresh_scan_page_audit(
     has since 404'd doesn't linger in the UI."""
     scan = _check_scan_access(scan_id, user, db)
     _create_job(db, scan_id, "audit_scan_pages", {
+        "reset": bool(reset),
+        "limit": int(limit) if limit else 400,
+    })
+    db.commit()
+    return {"status": "enqueued", "scan_id": scan_id, "reset": bool(reset), "limit": limit}
+
+
+# --- Sprint 6 : schema.org / JSON-LD audit + generator --------------------
+# Same source URLs as Sprint 5 (the user's own pages cited by an LLM during
+# the scan). For each one we extract existing JSON-LD blocks, detect the
+# page type, generate the missing schema.org blocks, validate them locally
+# against the schema.org required-property spec. No LLM cost. Cf.
+# project_10_action_features.md #5 + worker/handlers/audit_scan_schemas.py.
+
+@router.get("/{scan_id}/schema-audit")
+async def get_scan_schema_audit(scan_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """Return the schema audit per cited URL, sorted by schema_score ASC
+    (worst first) so the user attacks the highest-leverage fixes first."""
+    scan = _check_scan_access(scan_id, user, db)
+
+    rows = (
+        db.query(ScanSchemaAudit)
+        .filter(ScanSchemaAudit.scan_id == scan_id)
+        .order_by(
+            ScanSchemaAudit.fetch_error.is_(None).desc(),
+            ScanSchemaAudit.schema_score.asc().nullslast(),
+            ScanSchemaAudit.citation_count.desc(),
+        )
+        .all()
+    )
+
+    success_rows = [r for r in rows if r.fetch_error is None and r.schema_score is not None]
+    avg_score = round(sum(r.schema_score for r in success_rows) / len(success_rows), 1) if success_rows else None
+
+    # Tally missing schemas across the scan so the hero banner can surface
+    # the biggest opportunity ("FAQPage missing on 14 pages").
+    missing_tally: dict[str, int] = {}
+    for r in success_rows:
+        for t in (r.missing_schemas or []):
+            missing_tally[t] = missing_tally.get(t, 0) + 1
+
+    by_page_type: dict[str, int] = {}
+    for r in success_rows:
+        if r.page_type:
+            by_page_type[r.page_type] = by_page_type.get(r.page_type, 0) + 1
+
+    items = []
+    last_fetched = None
+    for r in rows:
+        if r.fetched_at and (last_fetched is None or r.fetched_at > last_fetched):
+            last_fetched = r.fetched_at
+        items.append({
+            "url": r.url,
+            "title": r.title,
+            "page_type": r.page_type,
+            "fetch_status": r.fetch_status,
+            "fetch_error": r.fetch_error,
+            "schema_score": r.schema_score,
+            "citation_count": r.citation_count,
+            "fetched_at": r.fetched_at.isoformat() + "Z" if r.fetched_at else None,
+            "existing_schemas": r.existing_schemas or [],
+            "missing_schemas": list(r.missing_schemas or []),
+            "generated_blocks": r.generated_blocks or {},
+        })
+
+    return {
+        "scan_id": scan_id,
+        "pages": items,
+        "summary": {
+            "audited": len(rows),
+            "succeeded": len(success_rows),
+            "failed": len(rows) - len(success_rows),
+            "avg_schema_score": avg_score,
+            "missing_by_type": missing_tally,
+            "by_page_type": by_page_type,
+        },
+        "last_fetched": last_fetched.isoformat() + "Z" if last_fetched else None,
+    }
+
+
+@router.post("/{scan_id}/schema-audit/refresh")
+async def refresh_scan_schema_audit(
+    scan_id: str,
+    reset: bool = False,
+    limit: int = 400,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Enqueue an `audit_scan_schemas` worker job. Free (no LLM)."""
+    scan = _check_scan_access(scan_id, user, db)
+    _create_job(db, scan_id, "audit_scan_schemas", {
         "reset": bool(reset),
         "limit": int(limit) if limit else 400,
     })
