@@ -7,9 +7,12 @@
  *   <Tip id="status" position="bottom">Status</Tip>
  *   <Tip text="Custom inline text">Label</Tip>
  *
- * No icon is rendered. The tooltip appears when the user hovers the slot content
- * (e.g. the column header text). Wrap any label text inside <Tip>…</Tip> to
- * make it hoverable.
+ * Implementation note (2026-05-28) : tooltip uses `position: fixed` with
+ * Alpine to compute viewport coordinates on hover. This escapes any
+ * ancestor `overflow: hidden` (otherwise tooltips on chips inside
+ * rounded cards were being clipped — visible truncation bug). The
+ * `kpi-tip` legacy CSS class is preserved for the dashboard styles in
+ * DashboardLayout.astro but new pages use the portal-style markup below.
  *
  * The TIPS dictionary below is the canonical vocabulary reference — add new
  * entries here rather than writing inline `text="..."` in call sites, so the
@@ -157,14 +160,77 @@ const TIPS: Record<string, string> = {
 };
 
 const tipText = text || TIPS[id || ''] || '';
-const posStyle = position === 'bottom' ? 'bottom:auto;top:100%;margin-top:8px;' : '';
+// position: top opens the tooltip above the trigger ; bottom opens below.
+// Both use viewport-fixed coordinates so they escape any ancestor
+// `overflow: hidden` (which was clipping tooltips on chip-bearing cards).
+const placeBelow = position === 'bottom';
 ---
 
 {tipText ? (
-  <span class="kpi-tooltip" style="display:inline;">
+  <span
+    class="senai-tip-trigger relative inline"
+    x-data={`{
+      visible: false,
+      x: 0, y: 0, side: '${placeBelow ? 'bottom' : 'top'}',
+      reposition($el) {
+        const r = $el.getBoundingClientRect();
+        const margin = 8;
+        const tipW = 280;
+        // Center horizontally on the trigger, then clamp inside the viewport.
+        let cx = r.left + r.width / 2;
+        const half = tipW / 2;
+        if (cx - half < margin) cx = half + margin;
+        if (cx + half > window.innerWidth - margin) cx = window.innerWidth - half - margin;
+        this.x = cx;
+        // Vertical : 'bottom' anchors to trigger bottom ; default to top.
+        // Flip if not enough room on the preferred side.
+        if (this.side === 'bottom' && r.bottom + 80 > window.innerHeight) this.side = 'top';
+        if (this.side === 'top' && r.top - 80 < 0) this.side = 'bottom';
+        this.y = this.side === 'bottom' ? r.bottom + margin : r.top - margin;
+      }
+    }`}
+    @mouseenter="reposition($el); visible = true"
+    @mouseleave="visible = false"
+    @focusin="reposition($el); visible = true"
+    @focusout="visible = false"
+  >
     <slot />
-    <span class="kpi-tip" style={posStyle} set:html={tipText}></span>
+    <span
+      class="senai-tip"
+      x-show="visible"
+      x-transition.opacity.duration.120ms
+      x-cloak
+      :style="`left:${x}px; top:${y}px; transform:${side === 'bottom' ? 'translateX(-50%)' : 'translate(-50%, -100%)'}`"
+      set:html={tipText}
+    ></span>
   </span>
 ) : (
   <slot />
 )}
+
+<style is:global>
+  .senai-tip-trigger { cursor: help; }
+  .senai-tip {
+    position: fixed;
+    z-index: 9999;
+    background: #1E293B;
+    color: white;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.5;
+    width: 280px;
+    text-align: left;
+    text-transform: none;
+    letter-spacing: normal;
+    white-space: normal;
+    word-break: normal;
+    overflow-wrap: break-word;
+    pointer-events: none;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  }
+  .senai-tip em { font-style: italic; opacity: 0.85; }
+  .senai-tip strong { font-weight: 600; }
+  [x-cloak] { display: none !important; }
+</style>
