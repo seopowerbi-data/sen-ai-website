@@ -74,6 +74,36 @@ function fmtDelta(d?: number | null) {
   if (d > 0) return `+${d}`;
   return String(d);
 }
+
+// Flatten a competitor's pages × winning_questions into one (question, URL)
+// row per LLM citation, deduped on (question_id, provider, URL). Kept out
+// of JSX to avoid esbuild parser ambiguity on `new Set<string>()` etc.
+function flattenCitationRows(pages: any[]): any[] {
+  const seen: Record<string, true> = {};
+  const rows: any[] = [];
+  (pages || []).forEach((p: any) => {
+    let pathOnly = p.url || '';
+    try { pathOnly = new URL(p.url).pathname || '/'; } catch (_) {}
+    (p.winning_questions || []).forEach((q: any) => {
+      const key = (q?.question_id || '') + '|' + (q?.provider || '') + '|' + p.url;
+      if (seen[key]) return;
+      seen[key] = true;
+      rows.push({
+        question: q?.question || '',
+        provider: q?.provider || '',
+        contexte: q?.contexte || '',
+        url: p.url,
+        pathOnly,
+        title: p.title,
+        geo_score: p.geo_score,
+        schema_score: p.schema_score,
+        audit_source: p.audit_source,
+        fetch_error: p.fetch_error,
+      });
+    });
+  });
+  return rows;
+}
 ---
 
 <ScanResultsLayout scanId={scanId} activeTab="competitors">
@@ -240,95 +270,98 @@ function fmtDelta(d?: number | null) {
 
               <div x-show={`expanded === '${cardKey}'`} x-transition class="border-t border-gray-100 px-6 py-4 bg-gray-50/30">
 
-                {/* Winning questions list */}
-                {c.winning_questions.length > 0 && (
-                  <div class="mb-4">
-                    <p class="text-[10px] uppercase tracking-wide text-charcoal-light font-semibold mb-2">
-                      Winning questions ({c.winning_questions.length})
-                    </p>
-                    <ul class="space-y-1">
-                      {c.winning_questions.slice(0, 10).map((q: any) => (
-                        <li class="text-[11px] text-charcoal-dark flex items-start gap-2">
-                          <span class="text-[9px] px-1.5 py-0.5 rounded bg-gray-100 text-charcoal-light shrink-0 mt-0.5 uppercase">
-                            {q.provider}
-                          </span>
-                          <span class="flex-1">{q.question}</span>
-                        </li>
-                      ))}
-                      {c.winning_questions.length > 10 && (
-                        <li class="text-[10px] text-charcoal-light italic">
-                          +{c.winning_questions.length - 10} more.
-                        </li>
-                      )}
-                    </ul>
-                  </div>
-                )}
-
-                {/* Per-page list */}
+                {/* Citation table : one row per (question, URL) pair so the user
+                    can see exactly which page the LLM picked for which query,
+                    and click to expand the citation snippet (what the LLM
+                    actually wrote). Built by flattening pages × winning_questions
+                    into a single ordered list. */}
                 <p class="text-[10px] uppercase tracking-wide text-charcoal-light font-semibold mb-2">
-                  Cited pages ({c.pages.length})
+                  Citations ({flattenCitationRows(c.pages || []).length})
                 </p>
-                <div class="space-y-2">
-                  {c.pages.map((p: any, pi: number) => {
-                    const pgeo = scoreClasses(p.geo_score);
-                    const pschema = scoreClasses(p.schema_score);
-                    let pathOnly = p.url;
-                    try { pathOnly = new URL(p.url).pathname || '/'; } catch (_) {}
-                    const validSchemas = (p.schemas || []).filter((s: any) => s.valid).map((s: any) => s.type);
-                    return (
-                      <div class="bg-white rounded-lg border border-gray-100 px-3 py-2">
-                        <div class="flex items-center gap-2">
-                          <span class="text-[10px] text-charcoal-light w-5 text-right shrink-0">{pi + 1}</span>
-                          <div class="flex-1 min-w-0">
-                            <a href={p.url} target="_blank" rel="noopener noreferrer" class="text-xs text-charcoal-dark hover:underline truncate block" title={p.url}>
-                              {p.title || pathOnly}
-                            </a>
-                            <p class="text-[10px] text-charcoal-light truncate">{pathOnly}</p>
-                          </div>
-                          {p.fetch_error && p.audit_source === 'contexte' && (
-                            <Tip id="comp_snippet_only">
-                              <span class="text-[9px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 shrink-0">
-                                snippet-only
-                              </span>
-                            </Tip>
-                          )}
-                          {p.fetch_error && p.audit_source !== 'contexte' && (
-                            <Tip id="comp_fetch_fail">
-                              <span class="text-[9px] px-1.5 py-0.5 rounded bg-red-50 text-red-600 shrink-0">fetch fail</span>
-                            </Tip>
-                          )}
-                          {p.citation_count > 0 && (
-                            <Tip id="comp_citation_count">
-                              <span class="text-[10px] text-charcoal-light shrink-0">
-                                {p.citation_count} cite(s)
-                              </span>
-                            </Tip>
-                          )}
-                          {p.geo_score != null && (
-                            <Tip id={p.audit_source === 'contexte' ? 'geo_page_score_contexte' : 'geo_page_score'}>
-                              <span class={`text-[10px] px-2 py-0.5 rounded font-semibold ${pgeo.bg} ${pgeo.text} shrink-0`}>
-                                GEO {p.geo_score}
-                              </span>
-                            </Tip>
-                          )}
-                          {p.schema_score != null && (
-                            <Tip id="schema_page_score">
-                              <span class={`text-[10px] px-2 py-0.5 rounded font-semibold ${pschema.bg} ${pschema.text} shrink-0`}>
-                                S {p.schema_score}
-                              </span>
-                            </Tip>
-                          )}
-                        </div>
-                        {validSchemas.length > 0 && (
-                          <div class="flex flex-wrap gap-1 mt-1.5 pl-7">
-                            {validSchemas.map((t: string) => (
-                              <span class="text-[9px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700">{t}</span>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+                <div class="overflow-x-auto bg-white rounded-lg border border-gray-100">
+                  <table class="w-full text-[11px]">
+                    <thead class="bg-gray-50 text-charcoal-light text-[10px] uppercase tracking-wide">
+                      <tr>
+                        <th class="text-left px-3 py-2 font-semibold w-16">AI</th>
+                        <th class="text-left px-3 py-2 font-semibold">Question</th>
+                        <th class="text-left px-3 py-2 font-semibold">Page cited</th>
+                        <th class="text-right px-3 py-2 font-semibold w-20">GEO</th>
+                        <th class="text-right px-3 py-2 font-semibold w-12"></th>
+                      </tr>
+                    </thead>
+                    <tbody x-data="{ open: null }">
+                      {flattenCitationRows(c.pages || []).map((r: any, ri: number) => {
+                        const rgeo = scoreClasses(r.geo_score);
+                        const rowKey = `${cardKey}-r${ri}`;
+                        const providerLabel = r.provider === 'openai'
+                          ? 'OpenAI'
+                          : (r.provider ? r.provider.charAt(0).toUpperCase() + r.provider.slice(1) : 'the LLM');
+                        return (
+                          <>
+                            <tr class="border-t border-gray-100 hover:bg-gray-50/60 cursor-pointer"
+                                @click={`open = open === '${rowKey}' ? null : '${rowKey}'`}>
+                              <td class="px-3 py-2 align-top">
+                                <span class="text-[9px] px-1.5 py-0.5 rounded bg-gray-100 text-charcoal-light uppercase font-semibold">
+                                  {r.provider}
+                                </span>
+                              </td>
+                              <td class="px-3 py-2 align-top text-charcoal-dark">
+                                {r.question}
+                              </td>
+                              <td class="px-3 py-2 align-top">
+                                <a href={r.url} target="_blank" rel="noopener noreferrer"
+                                   class="text-charcoal-dark hover:underline truncate block max-w-md"
+                                   title={r.url}
+                                   @click.stop>
+                                  {r.pathOnly}
+                                </a>
+                              </td>
+                              <td class="px-3 py-2 align-top text-right">
+                                {r.geo_score != null ? (
+                                  <Tip id={r.audit_source === 'contexte' ? 'geo_page_score_contexte' : 'geo_page_score'}>
+                                    <span class={`inline-block text-[10px] px-2 py-0.5 rounded font-semibold ${rgeo.bg} ${rgeo.text}`}>
+                                      {r.geo_score}
+                                    </span>
+                                  </Tip>
+                                ) : r.fetch_error ? (
+                                  <Tip id={r.audit_source === 'contexte' ? 'comp_snippet_only' : 'comp_fetch_fail'}>
+                                    <span class={`inline-block text-[9px] px-1.5 py-0.5 rounded ${r.audit_source === 'contexte' ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-600'}`}>
+                                      {r.audit_source === 'contexte' ? 'snippet' : 'fail'}
+                                    </span>
+                                  </Tip>
+                                ) : (
+                                  <span class="text-charcoal-light">-</span>
+                                )}
+                              </td>
+                              <td class="px-3 py-2 align-top text-right text-charcoal-light">
+                                <svg class="w-3.5 h-3.5 inline-block transition-transform"
+                                     :class={`open === '${rowKey}' ? 'rotate-180' : ''`}
+                                     fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                                </svg>
+                              </td>
+                            </tr>
+                            <tr x-show={`open === '${rowKey}'`} x-transition>
+                              <td colspan="5" class="px-3 py-3 bg-amber-50/40 border-t border-amber-100">
+                                <p class="text-[10px] uppercase tracking-wide text-charcoal-light font-semibold mb-2">
+                                  Citation snippet — what {providerLabel} wrote around this URL
+                                </p>
+                                {r.contexte ? (
+                                  <p class="text-[12px] text-charcoal-dark leading-relaxed font-serif italic whitespace-pre-wrap">
+                                    {r.contexte}
+                                  </p>
+                                ) : (
+                                  <p class="text-[11px] text-charcoal-light italic">
+                                    No snippet captured for this citation.
+                                  </p>
+                                )}
+                              </td>
+                            </tr>
+                          </>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
 
                 {/* Pattern delta detail */}

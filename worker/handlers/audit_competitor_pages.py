@@ -133,7 +133,9 @@ def _competitor_urls(
                jsonb_agg(DISTINCT jsonb_build_object(
                  'question_id', c.question_id::text,
                  'question',    sq.question,
-                 'provider',    c.provider
+                 'provider',    c.provider,
+                 'contexte',    c.contexte,
+                 'slr_id',      c.slr_id::text
                )) FILTER (WHERE sq.question IS NOT NULL) AS questions,
                array_agg(DISTINCT c.contexte) FILTER (WHERE c.contexte IS NOT NULL AND c.contexte != '') AS contextes
           FROM cites c
