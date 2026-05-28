@@ -1,132 +1,137 @@
-"""Handler : Sprint 8 Reddit opportunity finder.
+"""Handler : Sprint 8 Reddit opportunity finder (v1 contexte-only).
 
-For each scan we surface Reddit threads the LLMs already cite. Each
-thread is fetched via Reddit's public JSON endpoint (no scraping, no
-OAuth), then classified :
+Background : Reddit closed their Data API for commercial use in 2023 and
+blocks cloud-provider IPs on the public .json endpoint (confirmed May
+2026 - Hetzner IP → HTTP 403 regardless of User-Agent). Their commercial
+tier starts at $12k/mo enterprise. We don't qualify for the free
+non-commercial tier as a SaaS.
 
-  1. Is the target brand mentioned in (title + body + top comments) ?
-  2. Which competitor brands are mentioned ?
-  3. Sentiment via Haiku (capped, cheap, optional via job payload).
-  4. Composite leverage_score (0-100) drives the UI sort order so the
-     user sees the highest-opportunity threads first.
+So v1 mines what we already have legitimately : the LLM citation
+snippets in `scan_llm_results.citations[].contexte`. For each unique
+Reddit URL the LLMs cite in this scan we :
 
-Source of URLs : ONLY Reddit citations the LLMs already produced for
-this scan. No external SERP discovery in v1. Same architectural choice
-as Sprint 7 - mine what wins right now, broaden later.
+  1. Aggregate the LLM citation snippets (each ~200 chars) into a single
+     "what the LLMs said about this thread" corpus.
+  2. Parse the subreddit from the URL.
+  3. Regex-match brand mentions (target + competitors) on the corpus.
+  4. Classify : competitor_wins (competitor named, target absent) /
+     you_win (target named) / neutral.
+  5. Run a Haiku sentiment pass on the snippets if at least one brand is
+     in scope (saves budget on context-noise threads).
+  6. Score by `citation_count × classification_weight × sentiment_lever`.
 
-Caps :
-  - 100 threads max per scan, polite 0.6s delay between fetches.
-  - ~$0.10 max LLM cost per scan (100 × ~$0.001 Haiku per thread).
-  - Sentiment can be disabled via job payload `sentiment=false`.
+The user clicks an URL to read the full thread in their own browser
+(residential IP works fine ; Reddit only blocks server IPs). Same
+ethical stance as Sprint 7 #17 - sen-ai is the SaaS that doesn't scrape.
 
-Cost : LLM-bounded by the per-thread cap above. Plain HTTP for the
-Reddit fetches.
+Cost : ~$0.0003 per Haiku call × 100 threads × ~half-detected = ~$0.015
+per scan worst case. Bounded by the 100-thread cap and the brand-detected
+gate.
+
+If Reddit ever re-opens commercial API access, the OAuth fetcher lives
+in commit f21bc32 - restore and swap the URL source ; the rest of the
+pipeline keeps working.
 """
 from __future__ import annotations
 
 import logging
 import re
-import time
 from typing import Iterable
-from urllib.parse import urlparse
 
 from sqlalchemy import text as _text
 from sqlalchemy.orm import Session
 
-from adapters.reddit_client import fetch_thread, is_reddit_url, _canonical_url
-from adapters.reddit_sentiment import classify_thread
+from adapters.reddit_client import canonical_url, is_reddit_url, parse_subreddit, parse_title_slug
+from adapters.reddit_sentiment import classify_snippets
 
 logger = logging.getLogger(__name__)
 
-FETCH_DELAY_SECONDS = 0.6   # Reddit unauthenticated rate is ~1 req/s IP-wide.
 MAX_THREADS_PER_RUN = 100
-MIN_BRAND_LEN_FOR_REGEX = 3  # avoid matching "Vi" inside "Vichy" et al.
+MIN_BRAND_LEN_FOR_REGEX = 3
 
 
-def _cited_reddit_urls(db: Session, scan_id: str, limit: int) -> list[dict]:
-    """Find every Reddit thread URL cited by an LLM during this scan, with
-    citation counts and the questions that prompted them.
+def _cited_reddit_threads(db: Session, scan_id: str, limit: int) -> list[dict]:
+    """Mine every Reddit thread URL cited by an LLM during this scan.
+    Returns one entry per canonical URL with the aggregated metadata :
 
-    URL is normalized to the canonical Reddit form (strip query/fragment,
-    rewrite host variants) at projection time so `/r/x/comments/123` and
-    `old.reddit.com/r/x/comments/123/?ref=foo` collapse into one row.
+        {
+          url, subreddit,
+          citation_count,                # how many LLM responses cited it
+          contextes : [snippet, ...],    # for the Haiku sentiment pass
+          winning_questions : [{question_id, question, provider, contexte, slr_id}],
+        }
     """
     sql = _text(
         """
-        WITH cites AS (
-          SELECT slr.id AS slr_id,
-                 slr.question_id,
-                 slr.provider,
-                 citation->>'url' AS raw_url,
-                 lower(citation->>'domaine') AS domaine,
-                 citation->>'contexte' AS contexte
-            FROM scan_llm_results slr
-            JOIN LATERAL jsonb_array_elements(slr.citations) AS citation ON true
-           WHERE slr.scan_id = :scan_id
-             AND citation->>'url' IS NOT NULL
-             AND (lower(citation->>'domaine') LIKE '%reddit.com'
-                  OR citation->>'url' ILIKE '%reddit.com/%')
-        )
-        SELECT c.raw_url AS url,
-               COUNT(*) AS cites,
-               jsonb_agg(DISTINCT jsonb_build_object(
-                 'question_id', c.question_id::text,
-                 'question',    sq.question,
-                 'provider',    c.provider,
-                 'contexte',    c.contexte,
-                 'slr_id',      c.slr_id::text
-               )) FILTER (WHERE sq.question IS NOT NULL) AS questions
-          FROM cites c
-          LEFT JOIN scan_questions sq ON sq.id = c.question_id
-         GROUP BY c.raw_url
-         ORDER BY cites DESC
+        SELECT slr.id::text AS slr_id,
+               slr.question_id::text AS question_id,
+               sq.question AS question,
+               slr.provider AS provider,
+               citation->>'url' AS raw_url,
+               lower(citation->>'domaine') AS domaine,
+               citation->>'contexte' AS contexte
+          FROM scan_llm_results slr
+          JOIN LATERAL jsonb_array_elements(slr.citations) AS citation ON true
+          LEFT JOIN scan_questions sq ON sq.id = slr.question_id
+         WHERE slr.scan_id = :scan_id
+           AND citation->>'url' IS NOT NULL
+           AND (lower(citation->>'domaine') LIKE '%reddit.com'
+                OR citation->>'url' ILIKE '%reddit.com/%')
         """
     )
     raw_rows = db.execute(sql, {"scan_id": scan_id}).fetchall()
 
-    # Re-aggregate on the canonical URL form (the SQL above keeps raw URLs
-    # because Postgres split_part chains are awkward to filter on ; we'd
-    # rather do it in Python).
     bucket: dict[str, dict] = {}
     for r in raw_rows:
-        url = r[0]
-        if not is_reddit_url(url):
+        url = r.raw_url
+        if not url or not is_reddit_url(url):
             continue
-        canonical = _canonical_url(url)
+        canonical = canonical_url(url)
         b = bucket.get(canonical)
         if b is None:
-            b = {"url": canonical, "citation_count": 0, "winning_questions": []}
+            b = {
+                "url": canonical,
+                "subreddit": parse_subreddit(canonical),
+                "citation_count": 0,
+                "contextes": [],
+                "winning_questions": [],
+            }
             bucket[canonical] = b
-        b["citation_count"] += int(r[1] or 0)
-        seen = {(q.get("question_id"), q.get("provider")) for q in b["winning_questions"]}
-        for q in (r[2] or []):
-            key = (q.get("question_id"), q.get("provider"))
-            if key in seen:
-                continue
-            seen.add(key)
-            b["winning_questions"].append(q)
+        b["citation_count"] += 1
+        contexte = (r.contexte or "").strip()
+        if contexte and contexte not in b["contextes"]:
+            b["contextes"].append(contexte)
+        if r.question:
+            key = (r.question_id, r.provider)
+            existing = {(q.get("question_id"), q.get("provider")) for q in b["winning_questions"]}
+            if key not in existing:
+                b["winning_questions"].append({
+                    "question_id": r.question_id,
+                    "question": r.question,
+                    "provider": r.provider,
+                    "contexte": contexte,
+                    "slr_id": r.slr_id,
+                })
 
     out = sorted(bucket.values(), key=lambda x: -x["citation_count"])
     return out[:limit]
 
 
 def _scan_brands(db: Session, scan_id: str) -> tuple[set[str], set[str]]:
-    """Return (target_names, competitor_names) - lower-cased canonical names
-    + aliases of every brand classified for this scan. Used by the regex
-    mention matcher below.
-    """
+    """Return (target_names, competitor_names) - lowercased canonical names
+    + aliases of every brand classified for this scan."""
     target: set[str] = set()
     competitor: set[str] = set()
     rows = db.execute(_text(
         """
-        SELECT cb.name, cb.canonical_name, cb.aliases, sbc.classification, sbc.is_focus
+        SELECT cb.name, cb.canonical_name, cb.aliases, sbc.classification
           FROM scan_brand_classifications sbc
           JOIN client_brands cb ON cb.id = sbc.brand_id
          WHERE sbc.scan_id = :scan_id
            AND sbc.classification IN ('my_brand', 'competitor')
         """
     ), {"scan_id": scan_id}).fetchall()
-    for name, canonical, aliases, cls, _focus in rows:
+    for name, canonical, aliases, cls in rows:
         names = {n for n in [name, canonical, *(aliases or [])] if n}
         cleaned = {n.lower().strip() for n in names if n and len(n) >= MIN_BRAND_LEN_FOR_REGEX}
         if cls == "my_brand":
@@ -136,34 +141,16 @@ def _scan_brands(db: Session, scan_id: str) -> tuple[set[str], set[str]]:
     return target, competitor
 
 
-def _build_corpus(thread: dict) -> str:
-    """Concatenate title + body + comments for regex mention matching. The
-    text is lowercased once at the end."""
-    parts: list[str] = []
-    if thread.get("title"):
-        parts.append(str(thread["title"]))
-    if thread.get("body_excerpt"):
-        parts.append(str(thread["body_excerpt"]))
-    for c in thread.get("top_comments") or []:
-        body = c.get("body")
-        if body:
-            parts.append(str(body))
-    return "\n".join(parts).lower()
-
-
 def _detect_brands(corpus_lower: str, candidates: set[str]) -> set[str]:
     """Find which brand names appear as whole words in the lowercased
-    corpus. Skip very short tokens so we don't match 'fr' inside any
-    English text or 'svr' inside 'service' etc."""
+    corpus. Skip very short tokens so we don't match 'fr' inside text."""
     if not corpus_lower or not candidates:
         return set()
     hits: set[str] = set()
     for name in candidates:
         if len(name) < MIN_BRAND_LEN_FOR_REGEX:
             continue
-        # Word-boundary match, case-insensitive (corpus already lower).
-        pattern = r"\b" + re.escape(name) + r"\b"
-        if re.search(pattern, corpus_lower):
+        if re.search(r"\b" + re.escape(name) + r"\b", corpus_lower):
             hits.add(name)
     return hits
 
@@ -176,37 +163,39 @@ def _classify(target_hits: set[str], competitor_hits: set[str]) -> str:
     return "neutral"
 
 
-def _leverage_score(thread: dict, classification: str, sentiment: str | None) -> int:
-    """Composite 0-100 priority score : engagement + classification +
-    sentiment lever. See migration 050 comment for the formula breakdown."""
+def _leverage_score(citation_count: int, classification: str, sentiment: str | None) -> int:
+    """Composite 0-100 priority score for the contexte-only mode.
+
+    Without upvotes/comment counts we use `citation_count` as engagement
+    proxy : the more LLMs cite this thread, the broader its visibility
+    in the AI-search ecosystem. Caps at 8+ citations = full engagement
+    points (rare ; most threads get 1-3).
+
+    Same breakdown as the original full-thread version :
+      55 engagement (now : citation_count log-normalized to 8)
+      25 classification (competitor_wins=25, neutral=10, you_win=0)
+      20 sentiment lever (negative=20, neutral/mixed/None=10, positive=0)
+    """
     import math
 
-    score = int(thread.get("score") or 0)
-    comments = int(thread.get("num_comments") or 0)
-
-    # Engagement : log-scaled so a 1k-upvote thread doesn't crush a 100-upvote
-    # one. Normalized assuming log10(score)*log10(comments+1) tops around 8.
-    engagement_raw = math.log10(max(score, 1) + 1) * math.log10(comments + 1)
-    engagement = min(55, int(round(engagement_raw / 8.0 * 55)))
+    cc = max(0, int(citation_count or 0))
+    engagement_raw = math.log10(cc + 1) / math.log10(9)  # log scale, cap at 8 = 1.0
+    engagement = min(55, int(round(engagement_raw * 55)))
 
     cls_pts = {"competitor_wins": 25, "neutral": 10, "you_win": 0}.get(classification, 0)
 
-    sent_pts = 0
     if sentiment == "negative":
-        # Negative-about-the-competitor (if a competitor is in the convo)
-        # = high leverage. We don't know who the negativity targets without
-        # a finer pass ; treat all negative threads as opportunity for v1.
         sent_pts = 20
-    elif sentiment in ("neutral", "mixed", None):
-        sent_pts = 10
     elif sentiment == "positive":
         sent_pts = 0
+    else:
+        sent_pts = 10
 
     return max(0, min(100, engagement + cls_pts + sent_pts))
 
 
 def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
-    """Audit Reddit threads cited by LLMs in this scan.
+    """Audit Reddit threads cited by LLMs in this scan, contexte-only mode.
 
     job_payload :
       - reset (bool)         : drop existing rows before re-running
@@ -215,6 +204,7 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     """
     from models import Scan, ScanRedditThread
     from config import settings
+    from datetime import datetime
 
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
     if not scan:
@@ -228,65 +218,60 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
         db.query(ScanRedditThread).filter(ScanRedditThread.scan_id == scan_id).delete()
         db.commit()
 
-    pairs = _cited_reddit_urls(db, scan_id, limit)
-    if not pairs:
+    threads = _cited_reddit_threads(db, scan_id, limit)
+    if not threads:
         logger.info(f"audit_reddit_threads: no Reddit citations in scan {scan_id}")
-        return {"threads": 0, "errors": 0, "skipped": 0}
+        return {"threads": 0, "errors": 0, "sentiment_runs": 0}
 
     target_names, competitor_names = _scan_brands(db, scan_id)
     all_brand_names = sorted(list(target_names | competitor_names))[:30]
     api_key = (settings.anthropic_api_key or "").strip() if run_sentiment else ""
 
-    fetched_ok = 0
-    fetch_errors = 0
+    audited = 0
     sentiment_runs = 0
 
-    for p in pairs:
-        url = p["url"]
-        fetched = fetch_thread(url)
-        fetch_status = fetched["status"]
-        fetch_err = fetched["error"]
+    for t in threads:
+        url = t["url"]
+        contextes = t["contextes"]
+        # Build the brand-detection corpus from the URL slug (often the
+        # thread title verbatim) + the LLM citation snippets. The slug is
+        # the highest-signal source in contexte-only mode because LLM
+        # snippets are sometimes just `[Source: reddit.com]` with no body.
+        slug = parse_title_slug(url)
+        subreddit = t["subreddit"] or ""
+        corpus = "\n".join([slug, subreddit, *contextes]).lower()
 
-        thread_payload = {
-            "url": url,
-            "subreddit": fetched.get("subreddit"),
-            "title": fetched.get("title"),
-            "author": fetched.get("author"),
-            "score": fetched.get("score"),
-            "num_comments": fetched.get("num_comments"),
-            "posted_at": fetched.get("posted_at"),
-            "body_excerpt": fetched.get("body_excerpt"),
-            "top_comments": fetched.get("top_comments") or [],
-        }
+        target_hits = _detect_brands(corpus, target_names)
+        competitor_hits = _detect_brands(corpus, competitor_names)
+        target_mentioned = bool(target_hits)
+        competitors_hit = sorted(list(competitor_hits))
+        classification = _classify(target_hits, competitor_hits)
 
-        classification = None
-        target_mentioned = False
-        competitors_hit: list[str] = []
         sentiment = None
         sentiment_summary = None
-        leverage = None
+        if api_key and (target_mentioned or competitors_hit):
+            # Prepend the slug-derived title to the Haiku input so the
+            # model can read what the thread is about, not just what the
+            # LLM said when citing it.
+            snippets_for_haiku = ([f"Thread title (from URL): {slug}"] if slug else []) + contextes
+            res = classify_snippets(
+                url=url,
+                subreddit=t["subreddit"],
+                snippets=snippets_for_haiku,
+                brand_names=all_brand_names,
+                api_key=api_key,
+            )
+            if res:
+                sentiment = res.get("sentiment")
+                sentiment_summary = res.get("summary")
+                sentiment_runs += 1
 
-        if not fetch_err and thread_payload["title"]:
-            corpus = _build_corpus(thread_payload)
-            target_hits = _detect_brands(corpus, target_names)
-            competitor_hits = _detect_brands(corpus, competitor_names)
-            target_mentioned = bool(target_hits)
-            competitors_hit = sorted(list(competitor_hits))
-            classification = _classify(target_hits, competitor_hits)
-
-            if api_key and (target_mentioned or competitors_hit):
-                # Only spend LLM budget on threads with at least one brand
-                # in scope. Pure context noise gets sentiment=None.
-                res = classify_thread(thread_payload, all_brand_names, api_key)
-                if res:
-                    sentiment = res.get("sentiment")
-                    sentiment_summary = res.get("summary")
-                    sentiment_runs += 1
-
-            leverage = _leverage_score(thread_payload, classification, sentiment)
-            fetched_ok += 1
-        else:
-            fetch_errors += 1
+        leverage = _leverage_score(t["citation_count"], classification, sentiment)
+        # Synthetic "title" : the URL slug humanized, capitalized.
+        title_from_slug = slug.title() if slug else None
+        # body_excerpt = the concatenated LLM snippets so the UI can render
+        # "what the LLMs said about this thread" inline.
+        body_excerpt = "\n\n".join(contextes)[:4000]
 
         existing = (
             db.query(ScanRedditThread)
@@ -294,76 +279,59 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
             .first()
         )
         if existing:
-            existing.subreddit = thread_payload["subreddit"]
-            existing.title = thread_payload["title"]
-            existing.author = thread_payload["author"]
-            existing.score = thread_payload["score"]
-            existing.num_comments = thread_payload["num_comments"]
-            existing.posted_at = _parse_iso(thread_payload["posted_at"])
-            existing.fetch_status = fetch_status
-            existing.fetch_error = fetch_err
-            existing.citation_count = p["citation_count"]
+            existing.subreddit = t["subreddit"]
+            existing.title = title_from_slug
+            existing.fetched_at = datetime.utcnow()
+            existing.fetch_status = None
+            existing.fetch_error = None
+            existing.citation_count = t["citation_count"]
             existing.target_mentioned = target_mentioned
             existing.competitors_mentioned = competitors_hit
             existing.classification = classification
             existing.sentiment = sentiment
             existing.sentiment_summary = sentiment_summary
-            existing.body_excerpt = thread_payload["body_excerpt"]
-            existing.top_comments = thread_payload["top_comments"]
-            existing.winning_questions = p["winning_questions"]
+            existing.body_excerpt = body_excerpt
+            existing.top_comments = []  # contexte-only ; full thread fetch deferred
+            existing.winning_questions = t["winning_questions"]
             existing.leverage_score = leverage
         else:
             db.add(ScanRedditThread(
                 scan_id=scan_id,
                 url=url,
-                subreddit=thread_payload["subreddit"],
-                title=thread_payload["title"],
-                author=thread_payload["author"],
-                score=thread_payload["score"],
-                num_comments=thread_payload["num_comments"],
-                posted_at=_parse_iso(thread_payload["posted_at"]),
-                fetch_status=fetch_status,
-                fetch_error=fetch_err,
-                citation_count=p["citation_count"],
+                subreddit=t["subreddit"],
+                title=title_from_slug,
+                author=None,
+                score=None,
+                num_comments=None,
+                fetch_status=None,
+                fetch_error=None,
+                citation_count=t["citation_count"],
                 target_mentioned=target_mentioned,
                 competitors_mentioned=competitors_hit,
                 classification=classification,
                 sentiment=sentiment,
                 sentiment_summary=sentiment_summary,
-                body_excerpt=thread_payload["body_excerpt"],
-                top_comments=thread_payload["top_comments"],
-                winning_questions=p["winning_questions"],
+                body_excerpt=body_excerpt,
+                top_comments=[],
+                winning_questions=t["winning_questions"],
                 leverage_score=leverage,
             ))
 
-        if (fetched_ok + fetch_errors) % 10 == 0:
+        audited += 1
+        if audited % 25 == 0:
             db.commit()
             logger.info(
-                f"reddit audit progress {fetched_ok + fetch_errors}/{len(pairs)} "
-                f"(ok={fetched_ok} err={fetch_errors} sentiment_runs={sentiment_runs})"
+                f"reddit audit progress {audited}/{len(threads)} "
+                f"(sentiment_runs={sentiment_runs})"
             )
-
-        time.sleep(FETCH_DELAY_SECONDS)
 
     db.commit()
     logger.info(
-        f"reddit audit complete : threads={fetched_ok} errors={fetch_errors} "
-        f"sentiment_runs={sentiment_runs}"
+        f"reddit audit complete : threads={audited} sentiment_runs={sentiment_runs}"
     )
     return {
-        "threads": fetched_ok,
-        "errors": fetch_errors,
+        "threads": audited,
         "sentiment_runs": sentiment_runs,
-        "total": len(pairs),
+        "total": len(threads),
+        "mode": "contexte_only",
     }
-
-
-def _parse_iso(s: str | None):
-    if not s:
-        return None
-    try:
-        from datetime import datetime
-        # fromisoformat tolerates +00:00 ; trailing Z is not parseable < 3.11.
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
-    except (ValueError, TypeError):
-        return None

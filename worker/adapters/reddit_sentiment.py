@@ -1,18 +1,22 @@
 """Per-thread sentiment classification via Claude Haiku.
 
-Light-weight LLM call : single prompt, structured JSON out, capped at
-~4-6KB of input per thread (title + body excerpt + top comments). At
-Haiku 4.5 prices (~$0.80/M input, $4/M output) this costs ~$0.001-0.003
-per thread, so the default cap of 100 threads per scan lands well under
-the $1/day/client LLM budget guard.
+v1 contexte-only mode : input is the concatenated LLM citation snippets
+(scan_llm_results.citations[].contexte) for a single Reddit URL, NOT
+the full thread (Reddit blocks our cloud IP - see reddit_client.py
+docstring). At ~200 chars per snippet × ~5 snippets per URL, input is
+~1KB - even cheaper than the original full-thread version, ~$0.0003 per
+thread, ~$0.03 per 100-thread scan worst case.
 
-Why we run sentiment here instead of letting the user read the snippet :
+Why we run sentiment despite the thin input :
   - At 100 threads per scan, manual triage is impractical.
   - "Competitor mentioned" + "negative sentiment" = highest leverage
     opportunity (user can step in with a better answer).
   - "Competitor mentioned" + "positive sentiment" = lower leverage (the
     crowd already loves them ; harder to flip).
   - "Target brand mentioned + negative" = crisis signal worth flagging.
+  - The LLM's chosen snippet usually captures the strongest sentiment
+    cue from the thread (it's why the LLM grabbed that exact passage),
+    so signal density per byte is high.
 
 Output is bounded to 4 enum values + one short summary :
   sentiment ∈ {positive, negative, neutral, mixed}
@@ -32,61 +36,44 @@ logger = logging.getLogger(__name__)
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
 TIMEOUT = 60.0
 
-_PROMPT = """You read this Reddit thread and tell me the overall sentiment toward the brands or products being discussed. Stay neutral - you are an analyst, not an advocate.
-
-Thread title: {title}
+_PROMPT = """You read these snippets that an LLM (ChatGPT or Gemini) captured around a Reddit thread URL when answering a user question. The snippets are short (~200 chars each) and may include the link inline. Tell me the overall sentiment toward the brands of interest. Stay neutral - you are an analyst, not an advocate.
 
 Subreddit: r/{subreddit}
+Reddit URL: {url}
+Brands of interest: {brands}
 
-Original post:
-{body}
-
-Top comments:
-{comments}
-
-Mentioned brands of interest: {brands}
+LLM citation snippets (what the LLMs wrote when citing this thread):
+{snippets}
 
 Return ONLY this JSON (no markdown):
 
 {{
   "sentiment": "positive" | "negative" | "neutral" | "mixed",
-  "summary": "one neutral sentence (<= 200 chars) describing what the thread says about the brand(s) of interest. If no brand is mentioned, describe the user's intent. Do not paraphrase upvotes or moderator notes."
+  "summary": "one neutral sentence (<= 200 chars) describing what the snippets suggest about the brand(s) of interest in this Reddit discussion. If no brand is clearly mentioned, describe the topic of the citation."
 }}
 
 Rules:
-- "positive" : redditors recommend / praise the brand(s)
-- "negative" : redditors complain / warn against the brand(s)
-- "mixed"    : substantial pros AND cons in the discussion
-- "neutral"  : the brand is referenced as fact, no clear sentiment ; or the thread is informational with no brand opinion
+- "positive" : the snippets suggest redditors recommend / praise the brand(s)
+- "negative" : the snippets suggest redditors complain / warn against the brand(s)
+- "mixed"    : signals of both pros AND cons
+- "neutral"  : the brand is referenced as fact / source, no clear sentiment ; or the discussion is informational
 """
 
 
-def _format_comments(comments: list[dict]) -> str:
-    if not comments:
-        return "(no comments)"
-    out = []
-    for c in comments[:5]:
-        score = c.get("score") or 0
-        author = c.get("author") or "?"
-        body = (c.get("body") or "").strip()
-        if not body:
-            continue
-        # Truncate long comments inline so the prompt stays bounded.
-        if len(body) > 500:
-            body = body[:500] + "…"
-        out.append(f"[{score}↑] {author}: {body}")
-    return "\n".join(out) if out else "(no comments)"
+def _format_snippets(snippets: list[str]) -> str:
+    """Join the LLM citation snippets one per bullet. Each is already
+    pre-truncated (~200 chars) so we don't need additional trimming."""
+    cleaned = [s.strip() for s in (snippets or []) if s and s.strip()]
+    if not cleaned:
+        return "(no snippets captured)"
+    return "\n".join(f"- {s}" for s in cleaned[:10])
 
 
-def _build_prompt(thread: dict, brand_names: list[str]) -> str:
-    body = (thread.get("body_excerpt") or "").strip()
-    if len(body) > 2000:
-        body = body[:2000] + "…"
+def _build_prompt_from_snippets(url: str, subreddit: str | None, snippets: list[str], brand_names: list[str]) -> str:
     return _PROMPT.format(
-        title=thread.get("title") or "(no title)",
-        subreddit=thread.get("subreddit") or "?",
-        body=body or "(no body)",
-        comments=_format_comments(thread.get("top_comments") or []),
+        url=url or "(unknown)",
+        subreddit=subreddit or "?",
+        snippets=_format_snippets(snippets),
         brands=", ".join(brand_names) or "(none specified)",
     )
 
@@ -129,16 +116,26 @@ async def _call_haiku(prompt: str, api_key: str) -> dict:
             raise
 
 
-def classify_thread(thread: dict, brand_names: list[str], api_key: str) -> Optional[dict]:
-    """Run Haiku on one thread. Returns {sentiment, summary} or None on
-    failure. Always non-fatal - the caller persists the row regardless."""
+def classify_snippets(
+    url: str,
+    subreddit: str | None,
+    snippets: list[str],
+    brand_names: list[str],
+    api_key: str,
+) -> Optional[dict]:
+    """Run Haiku on one URL's LLM citation snippets. Returns {sentiment,
+    summary} or None on failure. Always non-fatal - the caller persists
+    the row regardless."""
     if not api_key:
         return None
-    prompt = _build_prompt(thread, brand_names)
+    cleaned = [s for s in (snippets or []) if s and s.strip()]
+    if not cleaned:
+        return None
+    prompt = _build_prompt_from_snippets(url, subreddit, cleaned, brand_names)
     try:
         result = asyncio.run(_call_haiku(prompt, api_key))
     except Exception:  # noqa: BLE001
-        logger.exception(f"reddit_sentiment failed for {thread.get('url')}")
+        logger.exception(f"reddit_sentiment failed for {url}")
         return None
     sentiment = (result.get("sentiment") or "").lower().strip()
     if sentiment not in ("positive", "negative", "neutral", "mixed"):
