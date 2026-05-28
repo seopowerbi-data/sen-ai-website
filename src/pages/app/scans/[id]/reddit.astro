@@ -414,8 +414,8 @@ function actionChip(a?: { label?: string; tone?: string }) {
                         {t.body_excerpt && (
                           <div class="mb-3 px-3 py-2 bg-white rounded border border-gray-100">
                             <p class="text-[10px] uppercase tracking-wide text-charcoal-light font-semibold mb-1">
-                              What the LLMs wrote about this thread
-                              <span class="text-[9px] text-charcoal-light normal-case italic font-normal">(excerpt around brand mentions)</span>
+                              LLM response excerpt around the Reddit citation
+                              <span class="text-[9px] text-charcoal-light normal-case italic font-normal">(±400 chars of the LLM response near where it cited this thread)</span>
                             </p>
                             <div class="text-[12px] text-charcoal-dark leading-relaxed whitespace-pre-wrap font-serif"
                                  x-data={`{

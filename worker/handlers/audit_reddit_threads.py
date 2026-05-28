@@ -277,59 +277,77 @@ def _build_response_excerpt(
     brand_names: set[str],
     contextes: list[str],
 ) -> str:
-    """Extract the most informative excerpt from the LLM response_texts
-    for inline UI display. Strategy :
+    """Extract the LLM response excerpt that actually surrounds the
+    Reddit URL citation - so the UI's "What the LLMs wrote about this
+    thread" label is honest.
 
-      1. For each brand name (target + competitors), find its first
-         occurrence in response_text and extract ±200 chars around it.
-      2. If no brand was matched, fall back to the window around the
-         Reddit URL citation.
-      3. If neither brand nor URL is found (rare), fall back to the
-         original LLM citation contextes (often `[Source: reddit.com]`).
+    Strategy (in order of preference) :
 
-    Excerpts are deduped, joined with " ... " separators, capped at
-    1800 chars total so the UI doesn't get a wall of text.
+      1. For each response_text, find the Reddit URL position and
+         extract a wide window (±400 chars) around it. This is the part
+         of the LLM answer that talks about the cited thread.
+      2. If the URL isn't textually present (Gemini sometimes references
+         the citation via a footnote marker), fall back to the window
+         around the FIRST brand mention - still informative because the
+         brand match is what triggered classification.
+      3. Last fall back : the original citation contextes (the maigre
+         "[Source: reddit.com]" that Gemini stores).
+
+    Excerpts deduped (positions within 100 chars treated as same window),
+    joined with " … " separators, capped at 2000 chars.
     """
-    WINDOW = 200
-    MAX_TOTAL = 1800
+    WINDOW = 400
+    MAX_TOTAL = 2000
 
     if not response_texts:
         return "\n\n".join(contextes)[:MAX_TOTAL]
 
     found: list[str] = []
-    seen_positions: set[tuple[int, int]] = set()
+    seen_positions: list[tuple[int, int, str]] = []  # (start, end, text_id)
 
-    def _add(text: str, pos: int):
+    def _add(text: str, pos: int, text_id: str):
         start = max(0, pos - WINDOW)
         end = min(len(text), pos + WINDOW)
-        # Dedupe overlapping windows.
-        for s, e in seen_positions:
-            if abs(s - start) < 50 and abs(e - end) < 50:
+        for s, e, tid in seen_positions:
+            if tid == text_id and abs(s - start) < 100:
                 return
-        seen_positions.add((start, end))
+        seen_positions.append((start, end, text_id))
         prefix = "…" if start > 0 else ""
         suffix = "…" if end < len(text) else ""
         found.append(prefix + text[start:end] + suffix)
 
-    for rt in response_texts:
-        low = rt.lower()
-        for name in brand_names:
-            if not name:
-                continue
-            idx = low.find(name.lower())
-            if idx >= 0:
-                _add(rt, idx)
-                break  # one match per response is enough
-        # Also try the Reddit URL itself.
-        if url:
-            url_idx = low.find(url.lower())
-            if url_idx >= 0:
-                _add(rt, url_idx)
+    # Pass 1 : anchor windows on the Reddit URL position. This is the
+    # one that honestly justifies the "wrote about this thread" label.
+    if url:
+        url_lower = url.lower()
+        for i, rt in enumerate(response_texts):
+            text_id = f"rt{i}"
+            low = rt.lower()
+            start = 0
+            while True:
+                idx = low.find(url_lower, start)
+                if idx < 0:
+                    break
+                _add(rt, idx, text_id)
+                start = idx + len(url_lower)
+                if len(found) >= 3:
+                    break
+
+    # Pass 2 : if no URL match found (Gemini footnote style), anchor on
+    # the first brand mention so the user still sees the brand context.
+    if not found:
+        for i, rt in enumerate(response_texts):
+            text_id = f"rt{i}"
+            low = rt.lower()
+            for name in brand_names:
+                if not name:
+                    continue
+                idx = low.find(name.lower())
+                if idx >= 0:
+                    _add(rt, idx, text_id)
+                    break
 
     if not found:
-        # Fall back to citation contextes when nothing matched in the
-        # response_text (rare ; means the brand mention is in a part
-        # we didn't capture).
         return "\n\n".join(contextes)[:MAX_TOTAL]
 
     out = " … ".join(found)
@@ -469,6 +487,17 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
                 target_sentiment = res.get("target_sentiment")
                 competitor_sentiment = res.get("competitor_sentiment")
                 sentiment_runs += 1
+
+        # Haiku is more accurate than our regex for non-ASCII brand names
+        # (e.g. "Avène" with the è word-boundary edge case). If Haiku
+        # returns a non-null per-brand sentiment, it means it found the
+        # brand in the response - override the regex False-negative so
+        # classification is consistent with what the UI shows.
+        if target_sentiment and not target_mentioned:
+            target_mentioned = True
+            target_hits = {focus_brand_name.lower()} if focus_brand_name else {"__haiku_match__"}
+        if competitor_sentiment and not competitor_hits:
+            competitor_hits = {"__haiku_match__"}
 
         # Classification is computed AFTER sentiment so head-to-head rows
         # can use the per-brand sentiment to decide you_lost / shared_*.
