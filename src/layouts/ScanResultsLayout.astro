@@ -224,21 +224,42 @@ const rangeContext = rangeParam === 'all' && runs.length > 1 ? ` (${runs.length}
     /* Sprint 7 — highlight a single cited URL (and its bare domain) inside
        the raw LLM response_text. Same yellow style as Tip/contexte preview.
        Used by competitors.astro to render the response inline with the
-       citation visually anchored. */
-    window.highlightUrlInResponse = function(text, url) {
+       citation visually anchored.
+
+       Gemini wraps its citations in vertex redirect URLs (vertexaisearch.
+       cloud.google.com/grounding-api-redirect/...), so the canonical URL
+       never appears in the response text. To still anchor the citation
+       visually we also highlight the bare brand name extracted from the
+       host (e.g. "vichy" from "www.vichy.fr") - usually appears in the
+       page title that Gemini lists alongside each redirect URL. */
+    window.highlightUrlInResponse = function(text, url, brandName) {
       if (!text) return '';
       var html = window._escHtml(text);
-      if (!url) return html;
-      var host = '';
-      try { host = new URL(url).hostname.replace(/^www\./, ''); } catch (_) {}
       var style = 'background:#fde68a;color:#1f2937;padding:1px 3px;border-radius:3px;font-weight:500';
+      var marked = false;
+      var mark = function(m) { marked = true; return '<mark style="' + style + '">' + m + '</mark>'; };
+
+      var host = '';
+      try { host = new URL(url || '').hostname.replace(/^www\./, ''); } catch (_) {}
+
+      // 1. Exact URL (rare in Gemini, common in OpenAI).
       if (url) {
-        var rxUrl = new RegExp('(' + window._escRx(url) + ')', 'gi');
-        html = html.replace(rxUrl, '<mark style="' + style + '">$1</mark>');
+        html = html.replace(new RegExp('(' + window._escRx(url) + ')', 'gi'), mark);
       }
+      // 2. Bare domain (e.g. "vichy.fr").
       if (host) {
-        var rxHost = new RegExp('\\b(' + window._escRx(host) + ')\\b', 'gi');
-        html = html.replace(rxHost, '<mark style="' + style + '">$1</mark>');
+        html = html.replace(new RegExp('\\b(' + window._escRx(host) + ')\\b', 'gi'), mark);
+      }
+      // 3. Brand stem extracted from the host (e.g. "vichy" from
+      //    "www.vichy.fr"). Skip very short stems (<4 chars) to avoid
+      //    over-matching common words.
+      var stem = host.split('.')[0] || '';
+      if (stem && stem.length >= 4) {
+        html = html.replace(new RegExp('\\b(' + window._escRx(stem) + ')\\b', 'gi'), mark);
+      }
+      // 4. Explicit brand name override if provided by the caller.
+      if (brandName && brandName.length >= 3) {
+        html = html.replace(new RegExp('\\b(' + window._escRx(brandName) + ')\\b', 'gi'), mark);
       }
       return html;
     };
