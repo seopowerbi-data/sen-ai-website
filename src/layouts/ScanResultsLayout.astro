@@ -233,11 +233,11 @@ const rangeContext = rangeParam === 'all' && runs.length > 1 ? ` (${runs.length}
        host (e.g. "vichy" from "www.vichy.fr") - usually appears in the
        page title that Gemini lists alongside each redirect URL. */
     window.highlightUrlInResponse = function(text, url, brandName) {
-      if (!text) return '';
+      if (!text) return { html: '', matched: false };
       var html = window._escHtml(text);
       var style = 'background:#fde68a;color:#1f2937;padding:1px 3px;border-radius:3px;font-weight:500';
-      var marked = false;
-      var mark = function(m) { marked = true; return '<mark style="' + style + '">' + m + '</mark>'; };
+      var matched = false;
+      var mark = function(m) { matched = true; return '<mark style="' + style + '">' + m + '</mark>'; };
 
       var host = '';
       try { host = new URL(url || '').hostname.replace(/^www\./, ''); } catch (_) {}
@@ -261,7 +261,7 @@ const rangeContext = rangeParam === 'all' && runs.length > 1 ? ` (${runs.length}
       if (brandName && brandName.length >= 3) {
         html = html.replace(new RegExp('\\b(' + window._escRx(brandName) + ')\\b', 'gi'), mark);
       }
-      return html;
+      return { html: html, matched: matched };
     };
   </script>
 

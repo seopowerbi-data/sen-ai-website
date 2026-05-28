@@ -381,6 +381,7 @@ function flattenCitationRows(pages: any[]): any[] {
                                     loaded: false,
                                     error: '',
                                     html: '',
+                                    matched: true,
                                     async load() {
                                       if (this.loaded || this.loading) return;
                                       this.loading = true;
@@ -388,7 +389,9 @@ function flattenCitationRows(pages: any[]): any[] {
                                         const res = await fetch('/api/scans/${scanId}/llm-result/${r.slr_id}', { credentials: 'same-origin' });
                                         if (!res.ok) throw new Error('HTTP ' + res.status);
                                         const d = await res.json();
-                                        this.html = window.highlightUrlInResponse(d.response_text || '', ${JSON.stringify(r.url)}, ${JSON.stringify(c.brand_name || '')});
+                                        const out = window.highlightUrlInResponse(d.response_text || '', ${JSON.stringify(r.url)}, ${JSON.stringify(c.brand_name || '')});
+                                        this.html = out.html;
+                                        this.matched = out.matched;
                                         this.loaded = true;
                                       } catch (e) {
                                         this.error = String(e && e.message || e);
@@ -404,6 +407,10 @@ function flattenCitationRows(pages: any[]): any[] {
                                   </p>
                                   <p x-show="loading" class="text-[11px] text-charcoal-light italic">Loading response...</p>
                                   <p x-show="error" class="text-[11px] text-red-600" x-text="error"></p>
+                                  <p x-show="loaded && !error && !matched"
+                                     class="text-[11px] text-amber-700 bg-amber-100/60 rounded px-2 py-1.5 mb-2 leading-snug">
+                                    <strong>Brand not mentioned in narrative.</strong> The LLM passed the URL as a footnote / source citation but never wrote "{c.brand_name}" in the answer body. This is a weak citation : your brand is invisible to the reader even though the link counts.
+                                  </p>
                                   {r.slr_id ? (
                                     <div
                                       x-show="loaded && !error"
