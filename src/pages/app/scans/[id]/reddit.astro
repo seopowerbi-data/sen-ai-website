@@ -37,6 +37,7 @@ try {
 const threads: any[] = data?.threads || [];
 const summary = data?.summary || {};
 const lastFetched = data?.last_fetched;
+const focusBrandName: string = data?.focus_brand_name || '';
 
 function timeAgo(iso?: string): string {
   if (!iso) return 'never';
@@ -419,18 +420,65 @@ function actionChip(a?: { label?: string; tone?: string }) {
 
                         {t.winning_questions && t.winning_questions.length > 0 && (
                           <div class="px-3 py-2 bg-white rounded border border-gray-100">
-                            <p class="text-[10px] uppercase tracking-wide text-charcoal-light font-semibold mb-1">
-                              LLMs cited this thread on
+                            <p class="text-[10px] uppercase tracking-wide text-charcoal-light font-semibold mb-2">
+                              LLM responses citing this thread <span class="text-[9px] text-charcoal-light normal-case italic font-normal">(click each to load the full answer with brand mentions highlighted)</span>
                             </p>
-                            <ul class="space-y-1">
-                              {t.winning_questions.slice(0, 5).map((q: any) => (
-                                <li class="text-[11px] text-charcoal-dark flex items-start gap-2">
-                                  <span class="text-[9px] px-1.5 py-0.5 rounded bg-gray-100 text-charcoal-light shrink-0 mt-0.5 uppercase">
-                                    {q.provider}
-                                  </span>
-                                  <span class="flex-1">{q.question}</span>
-                                </li>
-                              ))}
+                            <ul class="space-y-2">
+                              {t.winning_questions.slice(0, 10).map((q: any, qi: number) => {
+                                const qrowKey = `${rowKey}-q${qi}`;
+                                return (
+                                  <li>
+                                    <div
+                                      x-data={`{
+                                        open: false,
+                                        loading: false,
+                                        loaded: false,
+                                        error: '',
+                                        html: '',
+                                        async toggle() {
+                                          this.open = !this.open;
+                                          if (this.open && !this.loaded && !this.loading && '${q.slr_id}') {
+                                            this.loading = true;
+                                            try {
+                                              const res = await fetch('/api/scans/${scanId}/llm-result/${q.slr_id}', { credentials: 'same-origin' });
+                                              if (!res.ok) throw new Error('HTTP ' + res.status);
+                                              const d = await res.json();
+                                              const out = window.highlightUrlInResponse(d.response_text || '', ${JSON.stringify(t.url)}, ${JSON.stringify(focusBrandName)});
+                                              this.html = out.html;
+                                              this.loaded = true;
+                                            } catch (e) {
+                                              this.error = String(e && e.message || e);
+                                            } finally {
+                                              this.loading = false;
+                                            }
+                                          }
+                                        }
+                                      }`}
+                                    >
+                                      <button type="button"
+                                              class="text-[11px] text-charcoal-dark flex items-start gap-2 text-left w-full hover:bg-gray-50 px-1 py-1 rounded"
+                                              @click="toggle()">
+                                        <span class="text-[9px] px-1.5 py-0.5 rounded bg-gray-100 text-charcoal-light shrink-0 mt-0.5 uppercase">
+                                          {q.provider}
+                                        </span>
+                                        <span class="flex-1">{q.question}</span>
+                                        <svg class="w-3 h-3 text-charcoal-light shrink-0 mt-1 transition-transform" :class="open && 'rotate-180'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                                        </svg>
+                                      </button>
+                                      <div x-show="open" x-transition class="mt-2 ml-7 mr-1 px-3 py-2 bg-amber-50/40 rounded border border-amber-100">
+                                        <p x-show="loading" class="text-[10px] text-charcoal-light italic">Loading response...</p>
+                                        <p x-show="error" class="text-[10px] text-red-600" x-text="error"></p>
+                                        <div x-show="loaded && !error" x-html="html"
+                                             class="text-[11px] text-charcoal-dark leading-relaxed whitespace-pre-wrap max-h-72 overflow-y-auto bg-white rounded p-2 border border-amber-100 font-serif"></div>
+                                      </div>
+                                    </div>
+                                  </li>
+                                );
+                              })}
+                              {t.winning_questions.length > 10 && (
+                                <li class="text-[10px] text-charcoal-light italic">+ {t.winning_questions.length - 10} more.</li>
+                              )}
                             </ul>
                           </div>
                         )}

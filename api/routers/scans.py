@@ -3763,8 +3763,20 @@ async def get_reddit_opportunities(scan_id: str, user=Depends(get_current_user),
     opp_buckets = ("competitor_wins", "you_lost", "shared_crisis", "head_to_head")
     opportunities_total = sum(by_class.get(b, 0) for b in opp_buckets)
 
+    # Focus brand name for the UI to pass to the URL highlighter when
+    # rendering inline LLM responses. Read from the scan's focus_brand
+    # relationship ; fall back to the scan name.
+    scan_row = db.query(Scan).filter(Scan.id == scan_id).first()
+    focus_brand_name = ""
+    if scan_row:
+        if getattr(scan_row, "focus_brand_name", None):
+            focus_brand_name = scan_row.focus_brand_name or ""
+        elif getattr(scan_row, "focus_brand", None) and getattr(scan_row.focus_brand, "name", None):
+            focus_brand_name = scan_row.focus_brand.name or ""
+
     return {
         "scan_id": scan_id,
+        "focus_brand_name": focus_brand_name,
         "threads": items,
         "summary": {
             "total": len(rows),

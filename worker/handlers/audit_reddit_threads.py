@@ -52,13 +52,22 @@ MIN_BRAND_LEN_FOR_REGEX = 3
 
 def _cited_reddit_threads(db: Session, scan_id: str, limit: int) -> list[dict]:
     """Mine every Reddit thread URL cited by an LLM during this scan.
-    Returns one entry per canonical URL with the aggregated metadata :
 
+    Sprint 8.4 (2026-05-28) : in addition to the citation contexte snippet
+    (~200 chars) we also collect the FULL response_text of each citing
+    LLM response. The contexte alone is often too thin (e.g. Gemini just
+    writes "[Source: reddit.com]") to detect competitor mentions, but the
+    surrounding response often co-recommends multiple brands. Without
+    this broader corpus the classifier under-detects head_to_head /
+    you_lost cases.
+
+    Returns one entry per canonical URL with :
         {
           url, subreddit,
           citation_count,                # how many LLM responses cited it
           contextes : [snippet, ...],    # for the Haiku sentiment pass
-          winning_questions : [{question_id, question, provider, contexte, slr_id}],
+          response_texts : [text, ...],  # full LLM responses citing this URL
+          winning_questions : [...],
         }
     """
     sql = _text(
@@ -69,7 +78,8 @@ def _cited_reddit_threads(db: Session, scan_id: str, limit: int) -> list[dict]:
                slr.provider AS provider,
                citation->>'url' AS raw_url,
                lower(citation->>'domaine') AS domaine,
-               citation->>'contexte' AS contexte
+               citation->>'contexte' AS contexte,
+               slr.response_text AS response_text
           FROM scan_llm_results slr
           JOIN LATERAL jsonb_array_elements(slr.citations) AS citation ON true
           LEFT JOIN scan_questions sq ON sq.id = slr.question_id
@@ -80,6 +90,10 @@ def _cited_reddit_threads(db: Session, scan_id: str, limit: int) -> list[dict]:
         """
     )
     raw_rows = db.execute(sql, {"scan_id": scan_id}).fetchall()
+
+    # Cap each response_text contribution so a single very long LLM answer
+    # can't blow up the in-memory corpus when a URL is cited many times.
+    RESPONSE_TEXT_CAP = 4000
 
     bucket: dict[str, dict] = {}
     for r in raw_rows:
@@ -94,6 +108,8 @@ def _cited_reddit_threads(db: Session, scan_id: str, limit: int) -> list[dict]:
                 "subreddit": parse_subreddit(canonical),
                 "citation_count": 0,
                 "contextes": [],
+                "response_texts": [],
+                "_seen_slr": set(),
                 "winning_questions": [],
             }
             bucket[canonical] = b
@@ -101,6 +117,14 @@ def _cited_reddit_threads(db: Session, scan_id: str, limit: int) -> list[dict]:
         contexte = (r.contexte or "").strip()
         if contexte and contexte not in b["contextes"]:
             b["contextes"].append(contexte)
+        # Each (slr_id, URL) maps to ONE response_text - dedupe so we don't
+        # add the same response twice when an LLM cites the same URL
+        # multiple times within its answer.
+        if r.slr_id and r.slr_id not in b["_seen_slr"]:
+            b["_seen_slr"].add(r.slr_id)
+            rt = (r.response_text or "").strip()
+            if rt:
+                b["response_texts"].append(rt[:RESPONSE_TEXT_CAP])
         if r.question:
             key = (r.question_id, r.provider)
             existing = {(q.get("question_id"), q.get("provider")) for q in b["winning_questions"]}
@@ -112,6 +136,11 @@ def _cited_reddit_threads(db: Session, scan_id: str, limit: int) -> list[dict]:
                     "contexte": contexte,
                     "slr_id": r.slr_id,
                 })
+
+    # Drop the helper set before returning so the dict is JSON-serializable
+    # for downstream consumers if needed.
+    for b in bucket.values():
+        b.pop("_seen_slr", None)
 
     out = sorted(bucket.values(), key=lambda x: -x["citation_count"])
     return out[:limit]
@@ -320,13 +349,17 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     for t in threads:
         url = t["url"]
         contextes = t["contextes"]
-        # Build the brand-detection corpus from the URL slug (often the
-        # thread title verbatim) + the LLM citation snippets. The slug is
-        # the highest-signal source in contexte-only mode because LLM
-        # snippets are sometimes just `[Source: reddit.com]` with no body.
+        response_texts = t.get("response_texts") or []
+        # Sprint 8.4 : the brand-detection corpus now includes the FULL
+        # LLM response_text of each response that cited this Reddit URL,
+        # not just the 200-char contexte. Without this, head_to_head and
+        # you_lost were under-detected - the LLM often co-recommends
+        # multiple brands in its answer while citing Reddit for just one
+        # of them (audit Avène 2026-05-28 : 0 you_lost vs 35% of
+        # Reddit-citing responses actually mentioning competitors).
         slug = parse_title_slug(url)
         subreddit = t["subreddit"] or ""
-        corpus = "\n".join([slug, subreddit, *contextes]).lower()
+        corpus = "\n".join([slug, subreddit, *contextes, *response_texts]).lower()
 
         target_hits = _detect_brands(corpus, target_names)
         competitor_hits = _detect_brands(corpus, competitor_names)
@@ -338,10 +371,25 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
         target_sentiment = None
         competitor_sentiment = None
         if api_key and (target_mentioned or competitors_hit):
-            # Prepend the slug-derived title to the Haiku input so the
-            # model can read what the thread is about, not just what the
-            # LLM said when citing it.
-            snippets_for_haiku = ([f"Thread title (from URL): {slug}"] if slug else []) + contextes
+            # Snippets fed to Haiku :
+            #   1. URL-derived thread title (highest brand-mention signal)
+            #   2. The 200-char contextes from the LLM citations
+            #   3. Sprint 8.4 : extracts of response_texts when brands
+            #      were detected there (gives Haiku enough surrounding
+            #      content to read per-brand sentiment, otherwise the
+            #      contextes alone are too thin).
+            snippets_for_haiku: list[str] = []
+            if slug:
+                snippets_for_haiku.append(f"Thread title (from URL): {slug}")
+            snippets_for_haiku.extend(contextes)
+            # Add up to 2 response_text excerpts, each capped at 1500 chars,
+            # so Haiku has the broader recommendation context but the
+            # prompt stays bounded (~3 KB total).
+            for rt in response_texts[:2]:
+                if rt:
+                    snippets_for_haiku.append(
+                        f"Surrounding LLM response excerpt: {rt[:1500]}"
+                    )
             res = classify_snippets(
                 url=url,
                 subreddit=t["subreddit"],
