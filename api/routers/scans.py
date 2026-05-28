@@ -3673,6 +3673,29 @@ async def get_llm_result(
 # highest-opportunity conversations. Cf.
 # project_10_action_features.md #3 + worker/handlers/audit_reddit_threads.py.
 
+def _reddit_action(classification: str | None, sentiment: str | None) -> dict:
+    """Recommended action per row, derived deterministically from
+    (classification, sentiment). Kept in the API layer (not stored) so
+    the formula can evolve without a DB migration. Mirror of the
+    handler's _recommended_action function."""
+    cls = classification or "neutral"
+    sent = sentiment or "unclear"
+    if cls == "competitor_wins":
+        if sent == "negative":
+            return {"label": "Engage now", "tone": "urgent"}
+        if sent == "mixed":
+            return {"label": "Engage thoughtfully", "tone": "high"}
+        if sent in ("neutral", "unclear"):
+            return {"label": "Add your perspective", "tone": "medium"}
+        return {"label": "Skip - they win", "tone": "low"}
+    if cls == "you_win":
+        if sent == "negative":
+            return {"label": "Monitor crisis", "tone": "urgent"}
+        if sent == "mixed":
+            return {"label": "Monitor closely", "tone": "high"}
+        return {"label": "Keep monitoring", "tone": "positive"}
+    return {"label": "Context only", "tone": "low"}
+
 @router.get("/{scan_id}/reddit-opportunities")
 async def get_reddit_opportunities(scan_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
     """Return audited Reddit threads for this scan, sorted by leverage_score
@@ -3721,6 +3744,7 @@ async def get_reddit_opportunities(scan_id: str, user=Depends(get_current_user),
             "top_comments": r.top_comments or [],
             "winning_questions": r.winning_questions or [],
             "leverage_score": r.leverage_score,
+            "recommended_action": _reddit_action(r.classification, r.sentiment),
         })
 
     return {

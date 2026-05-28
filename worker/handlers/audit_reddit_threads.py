@@ -166,32 +166,70 @@ def _classify(target_hits: set[str], competitor_hits: set[str]) -> str:
 def _leverage_score(citation_count: int, classification: str, sentiment: str | None) -> int:
     """Composite 0-100 priority score for the contexte-only mode.
 
-    Without upvotes/comment counts we use `citation_count` as engagement
-    proxy : the more LLMs cite this thread, the broader its visibility
-    in the AI-search ecosystem. Caps at 8+ citations = full engagement
-    points (rare ; most threads get 1-3).
+    Audit feedback 2026-05-28 : the original formula tassed all rows
+    around 37-38 because citation_count is 1-2 on most threads and the
+    log-engagement dominated. New formula widens the classification
+    spread so competitor_wins clearly outranks you_win which clearly
+    outranks neutral. Engagement is a small boost on top.
 
-    Same breakdown as the original full-thread version :
-      55 engagement (now : citation_count log-normalized to 8)
-      25 classification (competitor_wins=25, neutral=10, you_win=0)
-      20 sentiment lever (negative=20, neutral/mixed/None=10, positive=0)
+    Breakdown (0-100) :
+      classification (max 50) : competitor_wins=50, you_win=15, neutral=0
+      sentiment lever (max 30) : depends on classification AND sentiment
+        - competitor_wins : negative=30, mixed=20, neutral=15, positive=5, unclear/none=10
+        - you_win        : negative=25 (crisis), mixed=10, neutral=5, positive=5, unclear/none=5
+        - neutral        : any=5 (low priority either way)
+      engagement (max 20) : log10(citation_count+1)*20, caps at ~6 cites
     """
     import math
 
     cc = max(0, int(citation_count or 0))
-    engagement_raw = math.log10(cc + 1) / math.log10(9)  # log scale, cap at 8 = 1.0
-    engagement = min(55, int(round(engagement_raw * 55)))
+    engagement = min(20, int(round(math.log10(cc + 1) * 20)))
 
-    cls_pts = {"competitor_wins": 25, "neutral": 10, "you_win": 0}.get(classification, 0)
+    cls_pts = {"competitor_wins": 50, "you_win": 15, "neutral": 0}.get(classification, 0)
 
-    if sentiment == "negative":
-        sent_pts = 20
-    elif sentiment == "positive":
-        sent_pts = 0
+    sent_pts = 0
+    if classification == "competitor_wins":
+        sent_pts = {
+            "negative": 30, "mixed": 20, "neutral": 15,
+            "unclear": 10, "positive": 5,
+        }.get(sentiment or "", 10)
+    elif classification == "you_win":
+        # Negative on you_win = crisis (your brand getting trashed).
+        sent_pts = {
+            "negative": 25, "mixed": 10, "neutral": 5,
+            "unclear": 5, "positive": 5,
+        }.get(sentiment or "", 5)
     else:
-        sent_pts = 10
+        sent_pts = 5
 
     return max(0, min(100, engagement + cls_pts + sent_pts))
+
+
+def _recommended_action(classification: str, sentiment: str | None) -> dict:
+    """Return a short action label + tone for the UI based on the row's
+    classification × sentiment matrix. Drives the right-most "Action"
+    column."""
+    cls = classification or "neutral"
+    sent = sentiment or "unclear"
+
+    if cls == "competitor_wins":
+        if sent == "negative":
+            return {"label": "Engage now", "tone": "urgent"}      # red
+        if sent == "mixed":
+            return {"label": "Engage thoughtfully", "tone": "high"}  # orange
+        if sent in ("neutral", "unclear"):
+            return {"label": "Add your perspective", "tone": "medium"}  # amber
+        # positive about competitor = harder to flip
+        return {"label": "Skip - they win", "tone": "low"}
+
+    if cls == "you_win":
+        if sent == "negative":
+            return {"label": "Monitor crisis", "tone": "urgent"}
+        if sent == "mixed":
+            return {"label": "Monitor closely", "tone": "high"}
+        return {"label": "Keep monitoring", "tone": "positive"}
+
+    return {"label": "Context only", "tone": "low"}
 
 
 def execute(job_payload: dict, scan_id: str, db: Session) -> dict:

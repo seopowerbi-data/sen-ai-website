@@ -76,13 +76,27 @@ function sentimentChip(s?: string) {
   if (s === 'negative') return { label: 'negative', cls: 'bg-amber-50 text-amber-700', tip: 'reddit_sentiment_neg' };
   if (s === 'mixed') return { label: 'mixed', cls: 'bg-sky-50 text-sky-700', tip: 'reddit_sentiment_mix' };
   if (s === 'neutral') return { label: 'neutral', cls: 'bg-gray-100 text-charcoal-light', tip: 'reddit_sentiment_neu' };
+  if (s === 'unclear') return { label: 'thin signal', cls: 'bg-gray-50 text-charcoal-light italic', tip: 'reddit_sentiment_unclear' };
   return null;
+}
+
+function actionChip(a?: { label?: string; tone?: string }) {
+  if (!a || !a.label) return { label: '-', cls: 'text-charcoal-light' };
+  const tone = a.tone || 'low';
+  const cls = {
+    urgent:   'bg-red-100 text-red-700 font-semibold',
+    high:     'bg-orange-100 text-orange-700',
+    medium:   'bg-amber-100 text-amber-800',
+    positive: 'bg-emerald-50 text-emerald-700',
+    low:      'bg-gray-100 text-charcoal-light',
+  }[tone] || 'bg-gray-100 text-charcoal-light';
+  return { label: a.label, cls };
 }
 
 ---
 
 <ScanResultsLayout scanId={scanId} activeTab="reddit">
-  <div x-data="{ filter: 'all', expanded: null, refreshing: false }">
+  <div x-data={`{ filter: '${(summary.competitor_wins || 0) > 0 ? 'competitor_wins' : (summary.you_win || 0) > 0 ? 'you_win' : 'all'}', expanded: null, refreshing: false }`}>
 
     <p class="text-sm text-charcoal-light mb-6">
       Reddit threads the LLMs already cite for this scan. Classification
@@ -111,23 +125,37 @@ function sentimentChip(s?: string) {
 
       <div class="bg-white rounded-xl shadow-sm p-6">
         <p class="text-[11px] text-charcoal-light uppercase tracking-wide mb-2">Sentiment mix</p>
-        {Object.keys(summary.by_sentiment || {}).length > 0 ? (
-          <div class="space-y-1">
-            {(['negative', 'mixed', 'neutral', 'positive']).map((s: any) => {
-              const n = (summary.by_sentiment || {})[s];
-              if (!n) return null;
-              const chip = sentimentChip(s);
-              return (
-                <div class="flex items-center gap-2 text-xs">
-                  <span class={`px-1.5 py-0.5 rounded ${chip?.cls}`}>{chip?.label}</span>
-                  <span class="text-charcoal-light">{n} thread(s)</span>
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <p class="text-sm text-charcoal-light mt-2">No sentiment data yet.</p>
-        )}
+        {(() => {
+          const bySent = summary.by_sentiment || {};
+          const sentTotal = (Object.values(bySent) as number[]).reduce((a, b) => a + (b || 0), 0);
+          const total = summary.total || 0;
+          if (sentTotal === 0) {
+            return <p class="text-xs text-charcoal-light italic mt-2">No brands detected in the cited threads, so no sentiment was scored.</p>;
+          }
+          const ratio = total > 0 ? sentTotal / total : 0;
+          return (
+            <>
+              <div class="space-y-1">
+                {(['negative', 'mixed', 'neutral', 'unclear', 'positive']).map((s: any) => {
+                  const n = (bySent as any)[s];
+                  if (!n) return null;
+                  const chip = sentimentChip(s);
+                  return (
+                    <div class="flex items-center gap-2 text-xs">
+                      <span class={`px-1.5 py-0.5 rounded ${chip?.cls}`}>{chip?.label}</span>
+                      <span class="text-charcoal-light">{n} thread(s)</span>
+                    </div>
+                  );
+                })}
+              </div>
+              {ratio < 0.3 && (
+                <p class="text-[10px] text-charcoal-light italic mt-2">
+                  Only {sentTotal} of {total} threads had a brand in scope. Most were neutral context.
+                </p>
+              )}
+            </>
+          );
+        })()}
       </div>
 
       <div class="bg-white rounded-xl shadow-sm p-6 flex flex-col justify-between">
@@ -186,9 +214,10 @@ function sentimentChip(s?: string) {
               <tr>
                 <th class="text-left px-3 py-2 font-semibold w-24">Subreddit</th>
                 <th class="text-left px-3 py-2 font-semibold">Thread</th>
-                <th class="text-left px-3 py-2 font-semibold w-32">Status</th>
+                <th class="text-left px-3 py-2 font-semibold w-28">Status</th>
                 <th class="text-left px-3 py-2 font-semibold w-24">Sentiment</th>
-                <th class="text-right px-3 py-2 font-semibold w-20">Score</th>
+                <th class="text-left px-3 py-2 font-semibold w-36">Action</th>
+                <th class="text-right px-3 py-2 font-semibold w-16">Score</th>
                 <th class="text-right px-3 py-2 font-semibold w-12"></th>
               </tr>
             </thead>
@@ -249,6 +278,18 @@ function sentimentChip(s?: string) {
                           <span class="text-[10px] text-charcoal-light">-</span>
                         )}
                       </td>
+                      <td class="px-3 py-2 align-top">
+                        {(() => {
+                          const a = actionChip(t.recommended_action);
+                          return (
+                            <Tip id="reddit_action">
+                              <span class={`inline-block text-[9px] px-2 py-0.5 rounded ${a.cls}`}>
+                                {a.label}
+                              </span>
+                            </Tip>
+                          );
+                        })()}
+                      </td>
                       <td class="px-3 py-2 align-top text-right">
                         {t.leverage_score != null ? (
                           <Tip id="reddit_leverage">
@@ -273,7 +314,7 @@ function sentimentChip(s?: string) {
                       </td>
                     </tr>
                     <tr x-show={`expanded === '${rowKey}'`} x-transition>
-                      <td colspan="6" class="px-3 py-3 bg-gray-50/40 border-t border-gray-100">
+                      <td colspan="7" class="px-3 py-3 bg-gray-50/40 border-t border-gray-100">
                         <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
                           <a href={t.url} target="_blank" rel="noopener noreferrer"
                              class="text-[12px] text-coral hover:underline font-medium">

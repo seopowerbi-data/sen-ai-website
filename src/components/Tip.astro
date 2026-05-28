@@ -172,6 +172,10 @@ const TIPS: Record<string, string> = {
     + '<em>If a competitor is in scope here, this is the strongest engagement signal.</em>',
   reddit_sentiment_neu: 'Haiku found the discussion factual / informational with no clear lean toward or against the brand(s).',
   reddit_sentiment_mix: 'Substantial pros AND cons in the same discussion. Read before engaging.',
+  reddit_sentiment_unclear: 'The LLM citation snippets were too thin to determine sentiment.<br/>'
+    + '<em>Often just a "[Source: reddit.com]" marker with no actual discussion content. Open the thread on Reddit to read it yourself.</em>',
+  reddit_action: 'Recommended action derived from the row\'s classification × sentiment.<br/>'
+    + '<em>Engage now / Add your perspective / Monitor / Skip - the closest one-word verdict on what to do with this thread.</em>',
   reddit_classification: 'Brand-mention status of the thread, derived from a whole-word regex match on the title + body + top 5 comments against your scan\'s brand list.',
   reddit_engagement: '<strong>↑ {0}</strong> upvotes · <strong>💬 {1}</strong> comments.<br/>'
     + '<em>Higher numbers = more visibility for whoever posts in this thread.</em>',

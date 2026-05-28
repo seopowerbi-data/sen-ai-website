@@ -18,8 +18,12 @@ Why we run sentiment despite the thin input :
     cue from the thread (it's why the LLM grabbed that exact passage),
     so signal density per byte is high.
 
-Output is bounded to 4 enum values + one short summary :
-  sentiment ∈ {positive, negative, neutral, mixed}
+Output is bounded to 5 enum values + one short summary :
+  sentiment ∈ {positive, negative, neutral, mixed, unclear}
+    - unclear : Haiku couldn't read the sentiment because the snippets
+      are too thin (no body text from the discussion, just a citation
+      marker). This is distinct from "neutral" which means "factual,
+      no opinion expressed" - the user reads them very differently.
   summary  ≤ 200 chars, neutral observer voice
 """
 from __future__ import annotations
@@ -48,7 +52,7 @@ LLM citation snippets (what the LLMs wrote when citing this thread):
 Return ONLY this JSON (no markdown):
 
 {{
-  "sentiment": "positive" | "negative" | "neutral" | "mixed",
+  "sentiment": "positive" | "negative" | "neutral" | "mixed" | "unclear",
   "summary": "one neutral sentence (<= 200 chars) describing what the snippets suggest about the brand(s) of interest in this Reddit discussion. If no brand is clearly mentioned, describe the topic of the citation."
 }}
 
@@ -56,7 +60,8 @@ Rules:
 - "positive" : the snippets suggest redditors recommend / praise the brand(s)
 - "negative" : the snippets suggest redditors complain / warn against the brand(s)
 - "mixed"    : signals of both pros AND cons
-- "neutral"  : the brand is referenced as fact / source, no clear sentiment ; or the discussion is informational
+- "neutral"  : the brand is referenced as fact / source, no clear sentiment expressed in the discussion
+- "unclear"  : you cannot determine sentiment from the snippets because they are too thin (e.g. just "[Source: reddit.com]") and contain no actual discussion content. DO NOT default to "neutral" in this case - the user reads them very differently.
 """
 
 
@@ -138,7 +143,7 @@ def classify_snippets(
         logger.exception(f"reddit_sentiment failed for {url}")
         return None
     sentiment = (result.get("sentiment") or "").lower().strip()
-    if sentiment not in ("positive", "negative", "neutral", "mixed"):
-        sentiment = "neutral"
+    if sentiment not in ("positive", "negative", "neutral", "mixed", "unclear"):
+        sentiment = "unclear"
     summary = (result.get("summary") or "").strip()[:300]
     return {"sentiment": sentiment, "summary": summary}
