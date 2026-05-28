@@ -356,109 +356,18 @@ function actionChip(a?: { label?: string; tone?: string }) {
                     </tr>
                     <tr x-show={`expanded === '${rowKey}'`} x-transition>
                       <td colspan="7" class="px-3 py-3 bg-gray-50/40 border-t border-gray-100">
-                        <div x-data={`{
-                               loadingReddit: false,
-                               redditLoaded: false,
-                               redditError: '',
-                               redditHtml: '',
-                               async loadReddit() {
-                                 if (this.loadingReddit || this.redditLoaded) return;
-                                 this.loadingReddit = true;
-                                 this.redditError = '';
-                                 try {
-                                   // Reddit's *.json endpoint rejects CORS preflight, so fetch()
-                                   // fails with "Failed to fetch". Fall back to JSONP script
-                                   // injection - they historically support ?jsonp=callbackName.
-                                   const jsonpFetch = (url) => new Promise((resolve, reject) => {
-                                     const cbName = 'snAiRedCb_' + Math.random().toString(36).slice(2, 11);
-                                     const tmo = setTimeout(() => { cleanup(); reject(new Error('Reddit didn\\'t respond within 20s')); }, 20000);
-                                     const cleanup = () => {
-                                       try { delete window[cbName]; } catch (_) { window[cbName] = undefined; }
-                                       if (script.parentNode) script.parentNode.removeChild(script);
-                                       clearTimeout(tmo);
-                                     };
-                                     window[cbName] = (data) => { cleanup(); resolve(data); };
-                                     const script = document.createElement('script');
-                                     script.src = url + (url.includes('?') ? '&' : '?') + 'jsonp=' + cbName;
-                                     script.onerror = () => { cleanup(); reject(new Error('JSONP failed (Reddit may have disabled the jsonp parameter or blocked your IP)')); };
-                                     document.head.appendChild(script);
-                                   });
-                                   const baseUrl = ${JSON.stringify(t.url)} + '.json?limit=20&sort=top&raw_json=1';
-                                   let data;
-                                   try {
-                                     const r = await fetch(baseUrl, { headers: { 'Accept': 'application/json' } });
-                                     if (!r.ok) throw new Error('HTTP ' + r.status);
-                                     data = await r.json();
-                                   } catch (e) {
-                                     // CORS-blocked browser fetch ; try JSONP.
-                                     data = await jsonpFetch(baseUrl);
-                                   }
-                                   const post = data[0]?.data?.children?.[0]?.data;
-                                   if (!post) throw new Error('Unexpected Reddit JSON shape');
-                                   const comments = (data[1]?.data?.children || [])
-                                     .filter(c => c.kind === 't1')
-                                     .map(c => c.data)
-                                     .filter(d => d && d.body && d.body !== '[deleted]' && d.body !== '[removed]')
-                                     .sort((a, b) => (b.score || 0) - (a.score || 0))
-                                     .slice(0, 10);
-                                   let html = '';
-                                   const hl = (text) => window.highlightUrlInResponse(text || '', ${JSON.stringify(t.url)}, ${JSON.stringify(focusBrandName)}, ${JSON.stringify(t.competitors_mentioned || [])}).html;
-                                   html += '<div class="mb-3"><div class="text-[10px] uppercase tracking-wide text-charcoal-light font-semibold mb-1">Original post</div>';
-                                   html += '<div class="text-[12px] font-semibold mb-1">' + hl(post.title) + '</div>';
-                                   if (post.selftext) {
-                                     html += '<div class="text-[11px] text-charcoal-dark leading-relaxed whitespace-pre-wrap font-serif">' + hl(post.selftext.slice(0, 4000)) + '</div>';
-                                   }
-                                   html += '<div class="text-[10px] text-charcoal-light mt-1">↑ ' + (post.score || 0) + ' · 💬 ' + (post.num_comments || 0) + ' · u/' + (post.author || '?') + '</div>';
-                                   html += '</div>';
-                                   if (comments.length > 0) {
-                                     html += '<div class="text-[10px] uppercase tracking-wide text-charcoal-light font-semibold mb-1">Top ' + comments.length + ' comments</div>';
-                                     html += '<ul class="space-y-2">';
-                                     for (const c of comments) {
-                                       html += '<li class="text-[11px] text-charcoal-dark leading-relaxed">';
-                                       html += '<span class="text-[9px] px-1 rounded bg-gray-100 text-charcoal-light mr-1">↑ ' + (c.score || 0) + '</span>';
-                                       html += '<strong class="text-[10px] text-charcoal-light">u/' + (c.author || '?') + '</strong>';
-                                       html += '<div class="mt-0.5 whitespace-pre-wrap font-serif">' + hl((c.body || '').slice(0, 1500)) + '</div>';
-                                       html += '</li>';
-                                     }
-                                     html += '</ul>';
-                                   }
-                                   this.redditHtml = html;
-                                   this.redditLoaded = true;
-                                 } catch (e) {
-                                   this.redditError = String(e && e.message || e);
-                                 } finally {
-                                   this.loadingReddit = false;
-                                 }
-                               }
-                             }`}>
-                          <div class="flex items-center justify-between mb-3 gap-3 flex-wrap">
-                            <div class="flex items-center gap-3 flex-wrap">
-                              <a href={t.url} target="_blank" rel="noopener noreferrer"
-                                 class="text-[12px] text-coral hover:underline font-medium">
-                                Open the full thread on Reddit ↗
-                              </a>
-                              <button type="button"
-                                      class="text-[11px] px-2 py-1 rounded bg-charcoal-dark text-white hover:bg-charcoal disabled:bg-gray-300 transition-colors"
-                                      @click="loadReddit()"
-                                      :disabled="loadingReddit || redditLoaded">
-                                <span x-show="!loadingReddit && !redditLoaded">Load Reddit thread inline</span>
-                                <span x-show="loadingReddit">Loading from Reddit...</span>
-                                <span x-show="redditLoaded">Loaded ✓</span>
-                              </button>
-                            </div>
-                            <span class="text-[10px] text-charcoal-light italic">
-                              Inline load fetches Reddit from your browser (not our server). Brand mentions highlighted.
+                        <div class="mb-3 px-3 py-3 bg-white rounded border border-coral/30">
+                          <div class="flex items-center justify-between gap-3 flex-wrap">
+                            <a href={t.url} target="_blank" rel="noopener noreferrer"
+                               class="text-[13px] text-coral hover:text-coral-dark font-semibold inline-flex items-center gap-1.5">
+                              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+                              </svg>
+                              Open the full Reddit thread in a new tab
+                            </a>
+                            <span class="text-[10px] text-charcoal-light italic max-w-md text-right">
+                              Reddit closed their commercial API (2023) and blocks CORS + JSONP from browsers, so we can't render the thread inline. Click above to read it directly.
                             </span>
-                          </div>
-                          <div x-show="redditError" class="mb-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded text-[11px] text-amber-800">
-                            <strong>Couldn't load from Reddit :</strong> <span x-text="redditError"></span>. Click "Open on Reddit" above to read the thread directly.
-                          </div>
-                          <div x-show="redditLoaded && !redditError" class="mb-3 px-3 py-3 bg-white rounded border border-emerald-200">
-                            <p class="text-[10px] uppercase tracking-wide text-charcoal-light font-semibold mb-2">
-                              Live Reddit thread content
-                              <span class="text-[9px] text-charcoal-light normal-case italic font-normal">(fetched live from your browser, brand mentions highlighted)</span>
-                            </p>
-                            <div x-html="redditHtml" class="max-h-96 overflow-y-auto"></div>
                           </div>
                         </div>
 
