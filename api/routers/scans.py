@@ -1193,6 +1193,31 @@ async def validate_scan_brands(scan_id: str, user=Depends(get_current_user), db:
     """
     scan = _check_scan_access(scan_id, user, db)
 
+    # Sprint 15.3 hotfix : when the user skips the explicit "Validate
+    # topics" Gate-1 click and lands straight on Brands tab, scan.status
+    # is still 'topics_ready'. The "Continue to personas" intent is an
+    # implicit topic validation — enqueue assign_keywords (which sets
+    # status='brands_ready'), set status to 'assigning_keywords' so the
+    # UI shows a clear progress state, and return 409 telling the UI to
+    # retry in a few seconds. The worker handler is fast (~1s), so the
+    # user just clicks again and it goes through. Future scans get the
+    # full auto-chain from classify_topics → assign_keywords (handled
+    # in worker/handlers/classify_topics.py same sprint).
+    if scan.status == "topics_ready":
+        active_topics = db.query(ScanTopic).filter(
+            ScanTopic.scan_id == scan_id, ScanTopic.is_active == True
+        ).count()
+        if active_topics == 0:
+            raise HTTPException(400, "Cannot validate brands : no active topics on this scan")
+        _create_job(db, scan_id, "assign_keywords")
+        scan.status = "assigning_keywords"
+        scan.updated_at = datetime.utcnow()
+        db.commit()
+        raise HTTPException(
+            409,
+            "Linking keywords to topics... refresh the page in a few seconds and click again.",
+        )
+
     if scan.status != "brands_ready":
         raise HTTPException(400, f"Cannot validate brands in status '{scan.status}' (expected 'brands_ready')")
     if not scan.focus_brand_id:

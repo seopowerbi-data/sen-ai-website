@@ -328,6 +328,15 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     # keywords — otherwise the job runs as a no-op (~20ms wasted poll cycle).
     if new_brands > 0:
         db.add(Job(scan_id=scan_id, job_type="cleanup_brands"))
+    # Sprint 15.3 - auto-chain assign_keywords so the scan reaches
+    # 'brands_ready' without requiring an explicit "Validate topics"
+    # Gate-1 click. The user can still review topics in the UI after
+    # the auto-progress ; the handler is idempotent (rerunning on a
+    # brands_ready scan only refreshes per-topic keyword counts).
+    # Removes the dead-end where the user clicks "Continue to personas"
+    # on a fresh scan and gets a 400 because status was still
+    # 'topics_ready'.
+    db.add(Job(scan_id=scan_id, job_type="assign_keywords"))
 
     db.commit()
 
