@@ -524,6 +524,27 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     db.add(JobModel(scan_id=scan_id, job_type="generate_editorial"))
     db.add(JobModel(scan_id=scan_id, job_type="cleanup_brands"))
     db.add(JobModel(scan_id=scan_id, job_type="judge_sentiment"))
+
+    # Post-scan audit auto-chain (free, heuristic / external-free-API only).
+    # All are in POST_SCAN_AUDIT_JOB_TYPES so a failure stays sandboxed and
+    # never cascades to scan.status='failed'. Each one is also idempotent
+    # at row level so re-running via the manual /refresh endpoint stays
+    # safe. Deliberately NOT included :
+    #   - audit_reddit_threads     (~$0.03 Haiku, opt-in by design)
+    #   - audit_competitor_pages   (Babbar rate-limit risk, ~1-2 min)
+    # Both still triggerable manually via their /refresh endpoints.
+    # Crisis radar reads scan_sentiment_judgements ; if it happens to run
+    # before judge_sentiment finishes (FIFO ordering on identical
+    # created_at is unspecified) it falls back to raw brand_mentions[]
+    # .sentiment per migration 057 design - acceptable.
+    db.add(JobModel(scan_id=scan_id, job_type="check_brand_wikipedia"))
+    db.add(JobModel(scan_id=scan_id, job_type="audit_scan_pages"))
+    db.add(JobModel(scan_id=scan_id, job_type="audit_scan_schemas"))
+    db.add(JobModel(scan_id=scan_id, job_type="audit_internal_links"))
+    db.add(JobModel(scan_id=scan_id, job_type="build_pr_outreach"))
+    db.add(JobModel(scan_id=scan_id, job_type="audit_youtube_creators"))
+    db.add(JobModel(scan_id=scan_id, job_type="build_crisis_radar"))
+
     db.commit()
 
     logger.info(f"Scan complete: {completed} tests, citations={citation_rate}%, brand={brand_rate}%")
