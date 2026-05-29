@@ -127,10 +127,18 @@ import Footer from '../components/Footer.astro';
               <span class="text-sm text-charcoal-light ml-1">/ 50 credits</span>
             </div>
             <p class="text-[10px] text-emerald-600 font-medium mb-5">€5.00 per credit - save 38%</p>
-            <a href="/register" class="block w-full py-2.5 border-2 border-coral text-coral font-medium rounded-lg hover:bg-coral hover:text-white transition-all text-center text-sm">
+            <a href="/register?intent=agency" class="block w-full py-2.5 border-2 border-coral text-coral font-medium rounded-lg hover:bg-coral hover:text-white transition-all text-center text-sm">
               Get started
             </a>
           </div>
+        </div>
+
+        <!-- Bridge to /agency for bigger volumes -->
+        <div class="mt-6 text-center">
+          <p class="text-sm text-charcoal-light">
+            Need 5 000+ scan credits, shared workspaces, or volume pricing?
+            <a href="/agency" class="text-coral hover:text-coral-dark font-medium">See agency packs →</a>
+          </p>
         </div>
       </div>
 
@@ -180,7 +188,7 @@ import Footer from '../components/Footer.astro';
               <span class="text-sm text-charcoal-light ml-1">/ 100 credits</span>
             </div>
             <p class="text-[10px] text-emerald-600 font-medium mb-5">€2.50 per credit - save 38%</p>
-            <a href="/register" class="block w-full py-2.5 border-2 border-charcoal-dark text-charcoal-dark font-medium rounded-lg hover:bg-charcoal-dark hover:text-white transition-all text-center text-sm">
+            <a href="/register?intent=agency" class="block w-full py-2.5 border-2 border-charcoal-dark text-charcoal-dark font-medium rounded-lg hover:bg-charcoal-dark hover:text-white transition-all text-center text-sm">
               Get started
             </a>
           </div>
