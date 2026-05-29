@@ -162,6 +162,28 @@ async def create_client(req: ClientCreate, user=Depends(get_current_user), db: S
 
     db.add(UserClient(user_id=user.id, client_id=client.id, role="manager"))
 
+    # Sprint 15.2 fix - welcome bonus grant moved here from the auth flow.
+    # Background : _grant_welcome_bonus in auth.py looks up UserClient to
+    # find a client_id, but at signup-time the user has NO client yet
+    # (the client is created AFTER signup, via this endpoint, by the
+    # welcome wizard). So the bonus silently no-op'd for every fresh
+    # account. Granting at first-client-creation guarantees the 50
+    # credits land where the user expects them to. Idempotent on the
+    # description so a re-create-client edge case doesn't double-grant.
+    if user.is_email_verified:
+        already_granted = db.query(ClientCredit).filter(
+            ClientCredit.client_id == client.id,
+            ClientCredit.description == "Welcome bonus — 50 free scan credits",
+        ).first()
+        if not already_granted:
+            db.add(ClientCredit(
+                client_id=client.id,
+                credit_type="scan",
+                amount=50,
+                balance_after=50,
+                description="Welcome bonus — 50 free scan credits",
+            ))
+
     db.commit()
     db.refresh(client)
 
