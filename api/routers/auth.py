@@ -612,13 +612,21 @@ async def login(request: Request, req: LoginRequest, response: Response, db: Ses
     return TokenResponse(access_token=token)
 
 
-def _sign_oauth_state() -> str:
-    """Create a signed, short-lived state JWT for CSRF protection on Google login."""
+_ALLOWED_INTENTS = {"agency"}
+
+
+def _sign_oauth_state(intent: str = "") -> str:
+    """Create a signed, short-lived state JWT for CSRF protection on Google login.
+    Sprint 15 : carries the signup `intent` (currently 'agency' only) so the
+    callback can forward the right onboarding flag to /welcome after auth.
+    Invalid intents are silently dropped - the state stays a CSRF token first."""
     payload = {
         "purpose": "google_login",
         "jti": uuid.uuid4().hex,
         "exp": datetime.utcnow() + timedelta(minutes=10),
     }
+    if intent and intent in _ALLOWED_INTENTS:
+        payload["intent"] = intent
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
@@ -634,8 +642,11 @@ def _verify_oauth_state(token: str) -> dict:
 
 
 @router.get("/google")
-async def google_login():
-    state = _sign_oauth_state()
+async def google_login(intent: str = ""):
+    """Sprint 15 : optional `?intent=agency` carries through the OAuth flow
+    via the signed `state` JWT. The callback decodes it and forwards to
+    /welcome?intent=agency so the wizard can surface the agency banner."""
+    state = _sign_oauth_state(intent=intent)
     params = {
         "client_id": settings.google_client_id,
         "redirect_uri": settings.google_redirect_uri,
@@ -651,7 +662,7 @@ async def google_login():
 
 @router.get("/google/callback")
 async def google_callback(code: str, state: str = "", response: Response = None, db: Session = Depends(get_db)):
-    _verify_oauth_state(state)
+    state_payload = _verify_oauth_state(state)
     async with httpx.AsyncClient() as client:
         token_resp = await client.post(
             "https://oauth2.googleapis.com/token",
@@ -703,7 +714,16 @@ async def google_callback(code: str, state: str = "", response: Response = None,
         _grant_welcome_bonus(user, db)
 
     token = create_token(str(user.id), user.email)
-    resp = RedirectResponse("/app/dashboard")
+    # Forward the agency intent (carried via the OAuth state JWT) so the
+    # /welcome wizard surfaces the agency banner and the deep onboarding
+    # flow (S15.1) can branch on it. Default redirect = /app/dashboard ;
+    # /app/dashboard itself redirects to /welcome when the user has no
+    # workspace yet, so the intent flag has to ride along.
+    intent = (state_payload or {}).get("intent") or ""
+    dest = "/app/dashboard"
+    if intent in _ALLOWED_INTENTS:
+        dest = f"/app/dashboard?intent={intent}"
+    resp = RedirectResponse(dest)
     resp.set_cookie(
         "token", token,
         httponly=True, secure=True, samesite="lax",

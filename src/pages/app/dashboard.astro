@@ -94,6 +94,14 @@ try {
   }
 } catch {}
 if (scans.length === 0 && orgCount === 0) {
+  // Forward the agency signup intent through to /welcome so the wizard
+  // can surface the agency-aware banner instead of the generic single-
+  // brand framing. The intent param rides in from the OAuth callback
+  // for Google signups OR the /register?intent=agency flow.
+  const intentForWizard = (Astro.url.searchParams.get('intent') || '').toLowerCase();
+  if (intentForWizard === 'agency') {
+    return Astro.redirect('/welcome?intent=agency');
+  }
   return Astro.redirect('/welcome');
 }
 

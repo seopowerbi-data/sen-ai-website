@@ -47,6 +47,13 @@ try {
 
 if (hasScans) return Astro.redirect('/app/dashboard');
 
+// Sprint 15 : surface an agency-aware banner when the signup intent was
+// agency (via /register?intent=agency OR Google OAuth state). The actual
+// bulk-workspace-creation flow is S15.1 ; v1 just makes sure the user
+// doesn't feel like they landed in the wrong product.
+const intentRaw = (Astro.url.searchParams.get('intent') || '').toLowerCase();
+const isAgencyIntent = intentRaw === 'agency';
+
 let user = { email: '', name: '' };
 let isEmailVerified = true;
 try {
@@ -105,8 +112,21 @@ try {
     <!-- Step 1: Enter domain -->
     <div x-show="step === 1" x-transition>
       <div class="bg-white rounded-2xl shadow-lg p-8">
-        <h1 class="text-2xl font-bold text-charcoal-dark mb-2">Welcome to sen-ai.fr</h1>
-        <p class="text-charcoal-light mb-4">Let's measure your brand's visibility in AI responses. It takes 2 minutes.</p>
+        {isAgencyIntent ? (
+          <>
+            <h1 class="text-2xl font-bold text-charcoal-dark mb-2">Welcome - let's set up your first client workspace</h1>
+            <p class="text-charcoal-light mb-3">You signed up as an <strong>agency</strong>. Start with one client domain below ; you'll be able to add more workspaces from the header dropdown once this one is running. <a href="/agency" class="text-coral hover:text-coral-dark">Learn more →</a></p>
+            <div class="bg-coral/5 border border-coral/30 rounded-lg px-4 py-2.5 mb-4 text-[12px] text-charcoal-dark flex items-start gap-2">
+              <svg class="w-4 h-4 text-coral mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V7M3 7l9 6 9-6M3 7l9-4 9 4"/></svg>
+              <span>Each workspace tracks one brand. You can invite teammates with granular roles (manager / editor / viewer) per workspace. Volume pricing kicks in at 5 000+ scan credits - <a href="mailto:contact@sen-ai.fr?subject=Agency%20volume%20quote" class="text-coral hover:text-coral-dark font-medium">get a quote</a>.</span>
+            </div>
+          </>
+        ) : (
+          <>
+            <h1 class="text-2xl font-bold text-charcoal-dark mb-2">Welcome to sen-ai.fr</h1>
+            <p class="text-charcoal-light mb-4">Let's measure your brand's visibility in AI responses. It takes 2 minutes.</p>
+          </>
+        )}
         {isEmailVerified ? (
           <div class="bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-2.5 mb-6 flex items-center gap-2">
             <span class="text-emerald-600 text-lg font-bold">+50</span>
