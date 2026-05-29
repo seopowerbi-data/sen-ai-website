@@ -2423,6 +2423,48 @@ def _apply_sentiment_overlay(brand_mentions, slr_id: str, overlay: dict) -> list
     return out
 
 
+def _maybe_judge_response_sentiment(brand_analysis: dict, overlaid_brand_mentions: list) -> dict:
+    """Derive a response-level `sentiment_marque_cible` from the overlaid
+    target-brand mentions. BrandAnalyzer emits one label per response ; if
+    the Judge overturned a target mention in that response, the response
+    label may now disagree with the per-mention reality and surface a
+    misleading red/green chip in questions.astro.
+
+    We only override when the Judge actually overlaid at least one target
+    mention, and we use a dominant rule (pos vs neg vs neu, ties -> neutre)
+    over the overlaid target sentiments. Acceptance criteria mirror the
+    Overview chip - FR + EN labels accepted.
+    """
+    if not brand_analysis:
+        return brand_analysis or {}
+    target = [bm for bm in overlaid_brand_mentions if bm.get("est_marque_cible")]
+    if not target or not any(bm.get("_judged") for bm in target):
+        return brand_analysis
+    pos = neg = neu = 0
+    for bm in target:
+        s = (bm.get("sentiment") or "").lower()
+        if s in ("positif", "positive"):
+            pos += 1
+        elif s in ("négatif", "negatif", "negative"):
+            neg += 1
+        else:
+            neu += 1
+    if pos > neg and pos > neu:
+        new_sent = "positif"
+    elif neg > pos and neg > neu:
+        new_sent = "négatif"
+    else:
+        new_sent = "neutre"
+    if new_sent == brand_analysis.get("sentiment_marque_cible"):
+        return brand_analysis
+    return {
+        **brand_analysis,
+        "sentiment_marque_cible": new_sent,
+        "_judged_response_sentiment": True,
+        "_raw_sentiment_marque_cible": brand_analysis.get("sentiment_marque_cible"),
+    }
+
+
 @router.get("/{scan_id}/results")
 async def get_results(scan_id: str, provider: str | None = Query(None), user=Depends(get_current_user), db: Session = Depends(get_db)):
     """Get scan results: overview, per-persona, competitors. Optional provider filter."""
@@ -2609,6 +2651,8 @@ async def get_results(scan_id: str, provider: str | None = Query(None), user=Dep
             judgment=judgment_dict,
             intent_category=(q.intent_category if q else None),
         )
+        overlaid_mentions = _apply_sentiment_overlay(r.brand_mentions or [], str(r.id), sentiment_overlay)
+        overlaid_brand_analysis = _maybe_judge_response_sentiment(r.brand_analysis or {}, overlaid_mentions)
         details.append({
             "question": q.question if q else "?",
             "type": q.type_question if q else "?",
@@ -2628,9 +2672,9 @@ async def get_results(scan_id: str, provider: str | None = Query(None), user=Dep
                     bm.get("brand_name_groupby") or bm.get("brand_name", ""),
                     classification_map, focus_names_lower
                 )}
-                for bm in _apply_sentiment_overlay(r.brand_mentions or [], str(r.id), sentiment_overlay)
+                for bm in overlaid_mentions
             ],
-            "brand_analysis": r.brand_analysis or {},
+            "brand_analysis": overlaid_brand_analysis,
             "response_text": r.response_text or "",
             "duration_ms": r.duration_ms,
             # Sprint J judgment payload - None when not yet judged.
@@ -2815,6 +2859,7 @@ async def get_results_aggregated(
 
         run_idx = scan_run_map.get(r.scan_id, 0)
         run_date = scan_date_map.get(r.scan_id)
+        overlaid_mentions = _apply_sentiment_overlay(r.brand_mentions or [], str(r.id), sentiment_overlay)
         question_groups[key]["runs"].append({
             "run_index": run_idx,
             "scan_id": str(r.scan_id),
@@ -2824,8 +2869,8 @@ async def get_results_aggregated(
             "target_position": r.target_position,
             "provider": r.provider,
             "model": r.model,
-            "brand_mentions": _apply_sentiment_overlay(r.brand_mentions or [], str(r.id), sentiment_overlay),
-            "brand_analysis": r.brand_analysis or {},
+            "brand_mentions": overlaid_mentions,
+            "brand_analysis": _maybe_judge_response_sentiment(r.brand_analysis or {}, overlaid_mentions),
             "citations": r.citations or [],
             "response_text": r.response_text or "",
             "duration_ms": r.duration_ms,
