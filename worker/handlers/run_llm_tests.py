@@ -514,11 +514,16 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     # populates intent_category before generate_opportunities reads it.
     # judge_question_responses can run in any order vs opportunities since
     # it doesn't currently feed back into scoring (Sprint M will wire that).
+    # judge_sentiment audits brand_mentions[].sentiment for false positives
+    # and is consumed by Crisis radar + Overview/per-persona chips. Capped
+    # at $0.05/scan and idempotent on (slr_id, mention_index, contexte_hash)
+    # so a manual /sentiment-judge/refresh post-scan stays safe.
     db.add(JobModel(scan_id=scan_id, job_type="classify_question_intent"))
     db.add(JobModel(scan_id=scan_id, job_type="judge_question_responses"))
     db.add(JobModel(scan_id=scan_id, job_type="generate_opportunities"))
     db.add(JobModel(scan_id=scan_id, job_type="generate_editorial"))
     db.add(JobModel(scan_id=scan_id, job_type="cleanup_brands"))
+    db.add(JobModel(scan_id=scan_id, job_type="judge_sentiment"))
     db.commit()
 
     logger.info(f"Scan complete: {completed} tests, citations={citation_rate}%, brand={brand_rate}%")
