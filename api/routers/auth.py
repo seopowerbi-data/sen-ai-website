@@ -184,9 +184,6 @@ async def verify_email(request: Request, response: Response, db: Session = Depen
               target_type="user", ip=request.client.host if request.client else None)
     db.commit()
 
-    # Grant welcome bonus now that email is verified
-    _grant_welcome_bonus(user, db)
-
     # Set auth cookie so user is logged in after clicking the link
     auth_token = create_token(str(user.id), user.email)
     response.set_cookie(
@@ -195,7 +192,7 @@ async def verify_email(request: Request, response: Response, db: Session = Depen
         max_age=settings.jwt_expire_minutes * 60,
         path="/",
     )
-    return {"ok": True, "message": "Email verified. Welcome bonus credited!"}
+    return {"ok": True, "message": "Email verified. Create your first workspace to claim 50 free scan credits."}
 
 
 @router.post("/resend-verification")
@@ -209,28 +206,6 @@ async def resend_verification(request: Request, user=Depends(get_current_user), 
     verify_url = f"{settings.frontend_url}/verify-email?token={verify_token}"
     _send_verification_email(user.email, verify_url)
     return {"ok": True, "message": "Verification email sent."}
-
-
-def _grant_welcome_bonus(user: User, db: Session):
-    """Grant 50 scan credits to the user's client (called after email verification)."""
-    link = db.query(UserClient).filter(UserClient.user_id == user.id).first()
-    if not link:
-        return
-    # Check if bonus was already granted (idempotent)
-    existing = db.query(ClientCredit).filter(
-        ClientCredit.client_id == link.client_id,
-        ClientCredit.description == "Welcome bonus — 50 free scan credits",
-    ).first()
-    if existing:
-        return
-    db.add(ClientCredit(
-        client_id=link.client_id,
-        credit_type="scan",
-        amount=50,
-        balance_after=50,
-        description="Welcome bonus — 50 free scan credits",
-    ))
-    db.commit()
 
 
 @router.post("/logout")
@@ -698,7 +673,6 @@ async def google_callback(code: str, state: str = "", response: Response = None,
         userinfo = userinfo_resp.json()
 
     user = db.query(User).filter(User.google_id == userinfo["id"]).first()
-    is_new_user = False
     if not user:
         user = db.query(User).filter(User.email == userinfo["email"]).first()
         if user:
@@ -711,7 +685,6 @@ async def google_callback(code: str, state: str = "", response: Response = None,
             # Existing accounts (already in DB) continue to work and can link Google.
             if not settings.registration_open:
                 return RedirectResponse(f"{settings.frontend_url}/register?error=closed")
-            is_new_user = True
             # Sprint 15.1 : persist the intent carried via the OAuth
             # state so the agency framing stays sticky across re-logins.
             state_intent = (state_payload or {}).get("intent")
@@ -727,9 +700,9 @@ async def google_callback(code: str, state: str = "", response: Response = None,
         db.commit()
         db.refresh(user)
 
-    # Grant welcome bonus for new Google OAuth users (email pre-verified)
-    if is_new_user:
-        _grant_welcome_bonus(user, db)
+    # Welcome bonus is granted at first-client-creation (see clients.py
+    # create_client) - new Google OAuth users get the credits when they
+    # finish the welcome wizard, not at signup.
 
     token = create_token(str(user.id), user.email)
     # Forward the agency intent (carried via the OAuth state JWT) so the
