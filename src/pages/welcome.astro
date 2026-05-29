@@ -126,12 +126,15 @@ try {
       <div class="bg-white rounded-2xl shadow-lg p-8">
         {isAgencyIntent ? (
           <>
-            <h1 class="text-2xl font-bold text-charcoal-dark mb-2">Welcome - let's set up your first client workspace</h1>
-            <p class="text-charcoal-light mb-3">You signed up as an <strong>agency</strong>. Start with one client domain below ; you'll be able to add more workspaces from the header dropdown once this one is running. <a href="/agency" class="text-coral hover:text-coral-dark">Learn more →</a></p>
-            <div class="bg-coral/5 border border-coral/30 rounded-lg px-4 py-2.5 mb-4 text-[12px] text-charcoal-dark flex items-start gap-2">
-              <svg class="w-4 h-4 text-coral mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V7M3 7l9 6 9-6M3 7l9-4 9 4"/></svg>
-              <span>Each workspace tracks one brand. You can invite teammates with granular roles (manager / editor / viewer) per workspace. Volume pricing kicks in at 5 000+ scan credits - <a href="mailto:contact@sen-ai.fr?subject=Agency%20volume%20quote" class="text-coral hover:text-coral-dark font-medium">get a quote</a>.</span>
-            </div>
+            <h1 class="text-2xl font-bold text-charcoal-dark mb-2">Add your first client workspace</h1>
+            <p class="text-charcoal-light text-sm mb-3">
+              You're signed in as an <strong>agency</strong>. Add one client now ; use the header dropdown for more once this one's running.
+              <a href="/agency" target="_blank" class="text-coral hover:text-coral-dark whitespace-nowrap">Learn more →</a>
+            </p>
+            <p class="text-[11px] text-charcoal-light mb-4 leading-relaxed">
+              1 workspace = 1 brand · per-workspace roles (manager / editor / viewer) · volume pricing at 5 000+ credits
+              <a href="mailto:contact@sen-ai.fr?subject=Agency%20volume%20quote" class="text-coral hover:text-coral-dark font-medium">(get a quote)</a>.
+            </p>
           </>
         ) : (
           <>
@@ -158,10 +161,11 @@ try {
         <div class="space-y-5">
           <div>
             <label class="block text-sm font-medium text-charcoal-dark mb-1.5">
-              <Tip id="domain_input" position="bottom">Your website</Tip>
+              <Tip id="domain_input" position="bottom">{isAgencyIntent ? 'Client website' : 'Your website'}</Tip>
             </label>
             <input
-              type="text" x-model="domain" placeholder="e.g. eau-thermale-avene.fr"
+              type="text" x-model="domain"
+              placeholder={isAgencyIntent ? 'e.g. your-first-client.com' : 'e.g. eau-thermale-avene.fr'}
               @keydown.enter="!loading && domain && startAnalysis()"
               class="w-full px-4 py-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-coral/50 focus:border-coral text-lg"
             />
@@ -215,7 +219,7 @@ try {
           :disabled="!domain || loading"
           class="w-full mt-6 px-6 py-3.5 bg-coral text-white rounded-lg font-medium hover:bg-coral-dark hover:shadow-md hover:scale-[1.02] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
         >
-          <span x-show="!loading">Analyze my site</span>
+          <span x-show="!loading">{isAgencyIntent ? 'Add this client workspace' : 'Analyze my site'}</span>
           <span x-show="loading" class="flex items-center gap-2">
             <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
             Setting up...
@@ -224,7 +228,9 @@ try {
       </div>
 
       <p class="text-center text-xs text-charcoal-light mt-4">
-        We'll detect your brand, topics, and competitors automatically.
+        {isAgencyIntent
+          ? "We'll auto-detect this client's brand, topics, and competitors."
+          : "We'll detect your brand, topics, and competitors automatically."}
       </p>
     </div>
 
