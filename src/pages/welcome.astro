@@ -100,6 +100,18 @@ try {
 </head>
 <body class="welcome-bg min-h-screen flex items-center justify-center p-4" x-data={`onboarding('${clientId}', '${token}')`} x-cloak>
 
+  <!-- Top utility bar : keeps the user from being trapped on /welcome -->
+  <div class="fixed top-3 right-4 z-10 flex items-center gap-3 text-[12px]">
+    {user.email && (
+      <span class="text-charcoal-light hidden sm:inline">{user.email}</span>
+    )}
+    <a href="/app/dashboard" class="text-charcoal-light hover:text-charcoal-dark transition-colors">Skip for now</a>
+    <button
+      onclick="fetch('/api/auth/logout',{method:'POST',credentials:'same-origin'}).finally(()=>{document.cookie='token=; Max-Age=0; path=/; SameSite=Lax'; location.href='/login';})"
+      class="text-charcoal-light hover:text-coral transition-colors"
+    >Sign out</button>
+  </div>
+
   <div class="w-full max-w-lg">
 
     <!-- Logo -->
