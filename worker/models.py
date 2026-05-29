@@ -390,6 +390,29 @@ class ScanCrisisSignal(Base):
     __table_args__ = (UniqueConstraint("scan_id", "brand_id", name="uq_scan_crisis_signals_scan_brand"),)
 
 
+class ScanSentimentJudgement(Base):
+    """Sentiment Judge (migration 057) - per-mention overturn layer on top
+    of BrandAnalyzer.sentiment. One row per judged brand_mention.
+    PARITÉ obligatoire avec api/models.py.
+    """
+    __tablename__ = "scan_sentiment_judgements"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.id", ondelete="CASCADE"), nullable=False)
+    slr_id = Column(UUID(as_uuid=True), ForeignKey("scan_llm_results.id", ondelete="CASCADE"), nullable=False)
+    mention_index = Column(Integer, nullable=False)
+    brand_name = Column(Text, nullable=False)
+    contexte_hash = Column(Text, nullable=False)
+    raw_sentiment = Column(Text, nullable=False)
+    raw_justification = Column(Text)
+    judge_verdict = Column(Text, nullable=False)
+    judged_sentiment = Column(Text)
+    judge_reasoning = Column(Text)
+    judge_model = Column(Text, nullable=False, default="claude-haiku-4-5")
+    judge_cost_usd = Column(Numeric(10, 6))
+    judge_run_at = Column(DateTime, default=datetime.utcnow)
+
+
 class ClientBrandPage(Base):
     """Sitemap-discovered page for a client_brand domain.
 

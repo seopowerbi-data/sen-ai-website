@@ -12,7 +12,7 @@ from models import (
     Scan, ScanKeyword, ScanTopic, ScanPersona, ScanQuestion, ScanLLMResult,
     ScanQuestionJudgment,
     ScanBrandClassification, ScanBrandTopic, ScanOpportunity, ClientBrand,
-    ScanPageAudit, ScanSchemaAudit, ScanCompetitorPage, ScanRedditThread, ScanPROutreach, ScanInternalLink, ScanYouTubeCreator, ScanCrisisSignal,
+    ScanPageAudit, ScanSchemaAudit, ScanCompetitorPage, ScanRedditThread, ScanPROutreach, ScanInternalLink, ScanYouTubeCreator, ScanCrisisSignal, ScanSentimentJudgement,
     Client,
     Job, UserClient, get_db,
 )
@@ -4654,4 +4654,90 @@ async def get_compliance_data(scan_id: str, user=Depends(get_current_user), db: 
             "top_50": cited_domains,
         },
         "brand_classifications": by_class,
+    }
+
+
+# --- Sentiment Judge : Haiku-as-judge layer on top of BrandAnalyzer ----
+# Refreshes per-mention judgements for negative brand_mentions on this
+# scan. Crisis radar + Overview chip prefer the judged sentiment when
+# verdict='overturn'. Cap : $0.05/scan, 200 mentions max per run.
+
+@router.post("/{scan_id}/sentiment-judge/refresh")
+async def refresh_sentiment_judge(
+    scan_id: str,
+    reset: bool = False,
+    limit: int = 200,
+    budget: float = 0.05,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Enqueue a `judge_sentiment` worker job. Re-reads every
+    `brand_mentions[].sentiment = 'négatif'` with Claude Haiku 4.5 and
+    decides confirm / overturn / hedge. ~$0.001 per call ; per-scan
+    budget cap of $0.05 by default."""
+    _check_scan_access(scan_id, user, db)
+    _create_job(db, scan_id, "judge_sentiment", {
+        "reset": bool(reset),
+        "limit": int(limit),
+        "budget": float(budget),
+    })
+    db.commit()
+    return {"status": "enqueued", "scan_id": scan_id, "reset": bool(reset), "limit": limit, "budget": budget}
+
+
+@router.get("/{scan_id}/sentiment-judgements")
+async def get_sentiment_judgements(scan_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """Return the latest sentiment judgement per (slr_id, mention_index)
+    on this scan. Used by the Crisis tab for transparency : show the user
+    how many false positives were caught + the reasoning per overturn."""
+    _check_scan_access(scan_id, user, db)
+
+    # Latest judgement per (slr_id, mention_index) using a DISTINCT ON
+    # window. PostgreSQL specific but cleaner than a self-join.
+    from sqlalchemy import text as _text
+    rows = db.execute(_text(
+        """
+        SELECT DISTINCT ON (slr_id, mention_index)
+               id::text, scan_id::text, slr_id::text, mention_index,
+               brand_name, raw_sentiment, raw_justification,
+               judge_verdict, judged_sentiment, judge_reasoning,
+               judge_model, judge_cost_usd, judge_run_at
+          FROM scan_sentiment_judgements
+         WHERE scan_id = :sid
+         ORDER BY slr_id, mention_index, judge_run_at DESC
+        """
+    ), {"sid": scan_id}).fetchall()
+
+    items = []
+    by_verdict: dict[str, int] = {"confirm": 0, "overturn": 0, "hedge": 0}
+    total_cost = 0.0
+    for r in rows:
+        by_verdict[r.judge_verdict] = by_verdict.get(r.judge_verdict, 0) + 1
+        total_cost += float(r.judge_cost_usd or 0)
+        items.append({
+            "id": r.id,
+            "slr_id": r.slr_id,
+            "mention_index": r.mention_index,
+            "brand_name": r.brand_name,
+            "raw_sentiment": r.raw_sentiment,
+            "raw_justification": r.raw_justification,
+            "judge_verdict": r.judge_verdict,
+            "judged_sentiment": r.judged_sentiment,
+            "judge_reasoning": r.judge_reasoning,
+            "judge_model": r.judge_model,
+            "judge_cost_usd": float(r.judge_cost_usd or 0),
+            "judge_run_at": r.judge_run_at.isoformat() + "Z" if r.judge_run_at else None,
+        })
+
+    return {
+        "scan_id": scan_id,
+        "judgements": items,
+        "summary": {
+            "total": len(items),
+            "by_verdict": by_verdict,
+            "confirmed": by_verdict.get("confirm", 0),
+            "overturned": by_verdict.get("overturn", 0),
+            "hedged": by_verdict.get("hedge", 0),
+            "total_cost_usd": round(total_cost, 6),
+        },
     }

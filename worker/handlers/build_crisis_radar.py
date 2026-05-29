@@ -156,23 +156,43 @@ def _classified_brands(db: Session, scan_id: str) -> list[dict]:
 
 def _brand_mentions_with_context(db: Session, scan_id: str) -> list[dict]:
     """One row per (slr, brand_mention). Returns the mention plus the
-    question/topic/provider that triggered it."""
+    question/topic/provider that triggered it, AND the latest Sentiment
+    Judge verdict when present (only for negatives - the judge doesn't
+    process positives or neutrals).
+
+    The judge LEFT JOIN matches the latest judgement per (slr_id,
+    mention_index) by judge_run_at DESC. Stale judgements (whose
+    contexte_hash no longer matches the current mention contexte) are
+    silently ignored - they belonged to a different mention that
+    happened to share the same array slot before a re-run.
+    """
     # Topic lookup goes through scan_personas (which carries the topic_id) :
     # scan_questions has only persona_id, not topic_id, on this DB schema.
     sql = _text(
         """
-        SELECT slr.id::text       AS slr_id,
+        SELECT slr.id::text          AS slr_id,
                slr.question_id::text AS question_id,
-               sq.question           AS question,
-               sp.topic_id::text     AS topic_id,
-               st.name               AS topic_name,
-               slr.provider          AS provider,
-               bm                    AS mention
+               sq.question            AS question,
+               sp.topic_id::text      AS topic_id,
+               st.name                AS topic_name,
+               slr.provider           AS provider,
+               mention_with_index.bm  AS mention,
+               judged.judge_verdict   AS judge_verdict,
+               judged.judged_sentiment AS judged_sentiment
           FROM scan_llm_results slr
-          JOIN LATERAL jsonb_array_elements(slr.brand_mentions) AS bm ON true
+          JOIN LATERAL jsonb_array_elements(slr.brand_mentions)
+               WITH ORDINALITY AS mention_with_index(bm, idx) ON true
           LEFT JOIN scan_questions sq ON sq.id = slr.question_id
           LEFT JOIN scan_personas  sp ON sp.id = sq.persona_id
           LEFT JOIN scan_topics    st ON st.id = sp.topic_id
+          LEFT JOIN LATERAL (
+            SELECT j.judge_verdict, j.judged_sentiment, j.contexte_hash
+              FROM scan_sentiment_judgements j
+             WHERE j.slr_id = slr.id
+               AND j.mention_index = (mention_with_index.idx - 1)::int
+             ORDER BY j.judge_run_at DESC
+             LIMIT 1
+          ) AS judged ON true
          WHERE slr.scan_id = :scan_id
         """
     )
@@ -312,7 +332,18 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
 
         bucket = buckets[matched["brand_id"]]
         bucket["total_mentions"] += 1
-        sentiment = _normalize_sentiment(bm.get("sentiment"))
+        raw_sentiment = _normalize_sentiment(bm.get("sentiment"))
+        # Sentiment Judge override : if a judgement exists for this
+        # mention and verdict='overturn' OR 'hedge', use the judged
+        # sentiment instead of the BrandAnalyzer raw label. 'confirm'
+        # keeps the raw label. This fixes the brand_analyzer false-
+        # positive class (e.g. "X n'est pas destiné à Y" misclassified
+        # as négatif when it's just usage clarification).
+        verdict = getattr(r, "judge_verdict", None)
+        if verdict in ("overturn", "hedge"):
+            sentiment = _normalize_sentiment(getattr(r, "judged_sentiment", None)) or raw_sentiment
+        else:
+            sentiment = raw_sentiment
         if sentiment == "positive":
             bucket["positive_count"] += 1
         elif sentiment == "neutral":

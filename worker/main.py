@@ -124,7 +124,8 @@ def load_handlers():
                           build_pr_outreach,
                           audit_internal_links,
                           audit_youtube_creators,
-                          build_crisis_radar)  # noqa: F401
+                          build_crisis_radar,
+                          judge_sentiment)  # noqa: F401
     HANDLERS["fetch_keywords"] = fetch_keywords.execute
     HANDLERS["classify_topics"] = classify_topics.execute
     HANDLERS["assign_keywords"] = assign_keywords.execute
@@ -162,6 +163,7 @@ def load_handlers():
     HANDLERS["audit_internal_links"] = audit_internal_links.execute
     HANDLERS["audit_youtube_creators"] = audit_youtube_creators.execute
     HANDLERS["build_crisis_radar"] = build_crisis_radar.execute
+    HANDLERS["judge_sentiment"] = judge_sentiment.execute
 
 
 # Job types that operate on a single content item (one FAQ / article / …)
@@ -184,6 +186,7 @@ POST_SCAN_AUDIT_JOB_TYPES = {
     "audit_internal_links",     # Sprint 11
     "audit_youtube_creators",   # Sprint 10
     "build_crisis_radar",       # Sprint 12
+    "judge_sentiment",          # Sentiment Judge (anti-false-positive layer)
     "check_brand_wikipedia",    # Sprint 4
     "refresh_ai_snapshot",
     "measure_publish_outcome",
