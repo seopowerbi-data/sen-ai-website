@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from models import (
-    Client, Organization, OrganizationUser, OrgUserClient, Scan, User, get_db,
+    Client, Job, Organization, OrganizationUser, OrgUserClient, Scan, User, get_db,
 )
 from services.access import list_user_organizations, resolve_active_organization_id
 from services.auth_service import get_current_user
@@ -675,6 +675,37 @@ class NewOrgClientRequest(BaseModel):
     brand: str | None = None
 
 
+class BulkClientCreateRequest(BaseModel):
+    # One domain per element. The frontend splits a textarea on newlines and
+    # filters empties before submitting, so this list arrives already cleaned
+    # but we re-validate server-side. Capped at BULK_CLIENT_MAX_BATCH.
+    domains: list[str]
+
+
+BULK_CLIENT_MAX_BATCH = 50
+
+
+def _normalize_domain(raw: str) -> str:
+    """Same normalisation as scans.create_scan : lowercase, strip scheme,
+    drop trailing slash."""
+    return (
+        (raw or "")
+        .strip()
+        .lower()
+        .removeprefix("https://")
+        .removeprefix("http://")
+        .rstrip("/")
+    )
+
+
+def _workspace_name_from_domain(domain: str) -> str:
+    """Derive a workspace label from a domain. `eau-thermale-avene.fr` ->
+    `eau-thermale-avene` ; `www.klorane.com` -> `klorane`. Falls back to
+    the raw domain if no usable label is found (truly malformed input)."""
+    parts = [p for p in domain.split(".") if p and p != "www"]
+    return parts[0] if parts else domain
+
+
 class RenameOrgRequest(BaseModel):
     name: str
 
@@ -742,4 +773,124 @@ async def create_client_in_org(
         "name": client.name,
         "brand": client.brand,
         "organization_id": str(client.organization_id) if client.organization_id else None,
+    }
+
+
+@router.post("/{org_id}/clients/bulk")
+async def bulk_create_clients_in_org(
+    org_id: str,
+    req: BulkClientCreateRequest,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Sprint S15.4 - create N workspaces in one call for agencies onboarding
+    a portfolio. Each line of the input is treated as a domain ; we derive
+    the workspace name from its first non-www label.
+
+    For every successful entry we also create the draft Scan and enqueue
+    `fetch_keywords`, so the agency comes back ~10 min later with every
+    workspace ready at Gate-2 (Topics / Brands review).
+
+    Idempotent at row level : duplicate `(org_id, name)` is skipped and
+    reported under `skipped`, never raised, so a partial retry stays safe.
+    """
+    from services.sanitize import strip_tags
+    from models import UserClient
+    org, _caller = _require_org_manager(org_id, user, db)
+
+    raw = req.domains or []
+    if len(raw) > BULK_CLIENT_MAX_BATCH:
+        raise HTTPException(
+            400,
+            f"Too many workspaces in one batch (max {BULK_CLIENT_MAX_BATCH}). "
+            f"Split into smaller batches.",
+        )
+
+    # Seed dedup set with the org's existing client names so we skip
+    # duplicates in one DB roundtrip rather than per-loop.
+    existing_names = {
+        (c.name or "").lower()
+        for c in db.query(Client.name).filter(Client.organization_id == org.id).all()
+    }
+
+    created = []
+    skipped = []
+    errors = []
+    batch_seen: set[str] = set()  # de-dup within the submitted batch itself
+
+    for raw_domain in raw:
+        clean_domain = _normalize_domain(raw_domain)
+        if not clean_domain or "." not in clean_domain:
+            errors.append({"input": raw_domain, "message": "Invalid domain"})
+            continue
+
+        derived = _workspace_name_from_domain(clean_domain)
+        ws_name = strip_tags(derived)[:120]
+        if not ws_name:
+            errors.append({"input": raw_domain, "message": "Could not derive a workspace name"})
+            continue
+
+        if ws_name.lower() in existing_names or ws_name.lower() in batch_seen:
+            skipped.append({"input": raw_domain, "name": ws_name, "reason": "duplicate"})
+            continue
+        batch_seen.add(ws_name.lower())
+
+        client = Client(name=ws_name, organization_id=org.id)
+        db.add(client)
+        db.flush()  # assign client.id without committing - keeps the batch atomic
+
+        db.add(UserClient(user_id=user.id, client_id=client.id, role="manager"))
+        db.add(OrgUserClient(
+            organization_id=org.id,
+            user_id=user.id,
+            client_id=client.id,
+            role="manager",
+        ))
+
+        scan = Scan(
+            client_id=client.id,
+            name=ws_name,
+            domain=clean_domain,
+            config={
+                "max_position": 50,
+                "max_urls": 2000,
+                "target_domains": [clean_domain],
+                "brand_names": [],
+            },
+            scan_type="own_brand",
+            created_by=user.id,
+            run_index=1,
+            status="fetching_keywords",
+        )
+        db.add(scan)
+        db.flush()
+
+        db.add(Job(
+            scan_id=scan.id,
+            job_type="fetch_keywords",
+            status="pending",
+            payload={"domain": clean_domain, "max_position": 50, "max_urls": 2000},
+            attempts=0,
+            max_attempts=3,
+        ))
+
+        created.append({
+            "client_id": str(client.id),
+            "scan_id": str(scan.id),
+            "name": ws_name,
+            "domain": clean_domain,
+        })
+
+    db.commit()
+
+    return {
+        "created": created,
+        "skipped": skipped,
+        "errors": errors,
+        "summary": {
+            "submitted": len(raw),
+            "created": len(created),
+            "skipped": len(skipped),
+            "errors": len(errors),
+        },
     }
