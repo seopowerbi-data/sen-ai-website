@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -269,6 +269,26 @@ def _serialize_scan(scan: Scan) -> dict:
     }
 
 
+_RESCAN_INTERVALS = {
+    "weekly": timedelta(days=7),
+    "monthly": timedelta(days=30),
+}
+
+
+def _compute_next_run_at(schedule: str | None, anchor: datetime | None) -> datetime | None:
+    """Auto-rescan firing target. Returns None when schedule is manual or the
+    scan never completed (anchor is None) - the cron sweeper skips NULL
+    next_run_at, so an in-flight scan won't auto-rescan until run_llm_tests
+    populates this on completion.
+    """
+    if not schedule or schedule == "manual":
+        return None
+    interval = _RESCAN_INTERVALS.get(schedule)
+    if interval is None or anchor is None:
+        return None
+    return anchor + interval
+
+
 # --- Scan CRUD ---
 
 @router.post("/")
@@ -384,6 +404,12 @@ async def update_scan(scan_id: str, req: ScanUpdate, user=Depends(get_current_us
         if req.schedule not in ("manual", "weekly", "monthly"):
             raise HTTPException(400, "schedule must be manual, weekly or monthly")
         scan.schedule = req.schedule
+        # S15.4 auto-rescan: set the next firing target alongside the
+        # schedule so users see "next: in 7 days" right after picking
+        # weekly. For completed scans we anchor at completed_at + interval
+        # ; for in-flight scans we hold off (run_llm_tests will populate
+        # next_run_at on completion). schedule=manual clears the target.
+        scan.next_run_at = _compute_next_run_at(scan.schedule, scan.completed_at)
 
     scan.updated_at = datetime.utcnow()
     db.commit()

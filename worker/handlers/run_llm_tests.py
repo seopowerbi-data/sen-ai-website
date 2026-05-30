@@ -7,7 +7,7 @@ DB writes stay in the main thread (SQLAlchemy session is not thread-safe).
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -490,6 +490,12 @@ def execute(job_payload: dict, scan_id: str, db: Session) -> dict:
     scan.progress_message = f"Scan terminé - cité {citation_rate}%, marque mentionnée {brand_rate}%"
     scan.completed_at = datetime.utcnow()
     scan.updated_at = datetime.utcnow()
+    # S15.4 auto-rescan: anchor the next firing on this completion when
+    # the scan opted into a weekly / monthly schedule. The cron sweeper
+    # (worker/main.py) picks scans where next_run_at <= NOW() and re-launches.
+    _interval = {"weekly": timedelta(days=7), "monthly": timedelta(days=30)}.get(scan.schedule or "manual")
+    if _interval:
+        scan.next_run_at = scan.completed_at + _interval
     scan.summary = {
         "total_tests": completed,
         "errors": errors,

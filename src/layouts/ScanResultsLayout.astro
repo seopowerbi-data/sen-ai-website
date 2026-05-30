@@ -129,6 +129,66 @@ const rangeContext = rangeParam === 'all' && runs.length > 1 ? ` (${runs.length}
           currentTab={activeTab}
           rootScanId={rootScanId}
         />
+        {/* S15.4 auto-rescan schedule picker. Inline next to Rescan so the
+            "every week" mental model is right next to "do it now". The
+            inline relative time ("next in 7d") gives instant confidence
+            the toggle actually took. */}
+        <div
+          x-data={`{
+            sched: '${(scan as any).schedule || 'manual'}',
+            next: ${(scan as any).next_run_at ? `'${(scan as any).next_run_at}'` : 'null'},
+            saving: false,
+            err: '',
+            get nextLabel() {
+              if (!this.next || this.sched === 'manual') return '';
+              const d = new Date(this.next).getTime() - Date.now();
+              const days = Math.round(d / 86400000);
+              if (days <= 0) return 'due now';
+              if (days === 1) return 'next in 1d';
+              return 'next in ' + days + 'd';
+            },
+            async change(ev) {
+              const v = ev.target.value;
+              const prev = this.sched;
+              this.sched = v;
+              this.err = '';
+              this.saving = true;
+              try {
+                const r = await fetch('/api/scans/${scanId}', {
+                  method: 'PATCH',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ schedule: v }),
+                });
+                if (!r.ok) {
+                  const j = await r.json().catch(() => ({}));
+                  this.err = j.detail || 'Failed';
+                  this.sched = prev;
+                } else {
+                  const j = await r.json();
+                  this.next = j.next_run_at || null;
+                }
+              } catch (e) {
+                this.err = (e && e.message) || 'Network error';
+                this.sched = prev;
+              }
+              this.saving = false;
+            },
+          }`}
+          class="flex items-center gap-2"
+          title="Auto-rescan schedule"
+        >
+          <select
+            @change="change($event)"
+            :disabled="saving"
+            class="text-xs border border-gray-200 rounded-lg px-2 py-1.5 text-charcoal-dark bg-white hover:border-coral focus:outline-none focus:border-coral disabled:opacity-50"
+          >
+            <option value="manual" :selected="sched==='manual'">Manual</option>
+            <option value="weekly" :selected="sched==='weekly'">Weekly</option>
+            <option value="monthly" :selected="sched==='monthly'">Monthly</option>
+          </select>
+          <span x-show="nextLabel && !err" x-text="nextLabel" class="text-[10px] text-charcoal-light"></span>
+          <span x-show="err" x-text="err" class="text-[10px] text-red-500"></span>
+        </div>
         <button
           id="rescanBtn"
           class="px-4 py-2 bg-coral text-white rounded-lg text-sm font-medium hover:bg-coral-dark hover:shadow-md transition-all"
