@@ -10,6 +10,11 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 24  # 24 hours
 
+    # Shared with the worker, set via INTERNAL_SERVICE_TOKEN in .env. Used by
+    # the worker to call `POST /scans/{id}/auto-rescan` when the auto-rescan
+    # cron sweep detects a due scan. Header : X-Internal-Token.
+    internal_service_token: str = ""
+
     # Google OAuth
     google_client_id: str = ""
     google_client_secret: str = ""

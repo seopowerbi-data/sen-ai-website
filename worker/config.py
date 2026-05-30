@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     worker_id: str = "worker-1"
     poll_interval: int = 2
 
+    # Shared with the api container - same env var INTERNAL_SERVICE_TOKEN.
+    # Sent as X-Internal-Token header when calling `POST /scans/{id}/auto-rescan`
+    # from the auto-rescan cron sweep.
+    internal_service_token: str = ""
+    api_internal_base_url: str = "http://api:8000"
+
     # Job-type filtering for multi-worker fan-out (Step 1 of worker scaling).
     # Comma-separated lists. Empty = no filter (legacy behavior, one worker
     # handles everything). Typical split:

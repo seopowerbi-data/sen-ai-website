@@ -74,6 +74,29 @@ function categoryChip(cat?: string | null) {
   }
 }
 
+// S12.1 - sparkline of severity over the lineage. Renders nothing when
+// there's only the current scan ; otherwise draws a small inline SVG
+// scaled to the 0-100 severity space. Last point is highlighted.
+function crisisSpark(trend: any[], w = 60, h = 18): string {
+  if (!Array.isArray(trend) || trend.length < 2) return '';
+  const vals = trend.map((t: any) => Number(t?.severity) || 0);
+  const step = w / (vals.length - 1);
+  const pts = vals.map((v, i) => `${(i * step).toFixed(1)},${(h - (v / 100) * h).toFixed(1)}`).join(' ');
+  const last = vals[vals.length - 1];
+  const stroke = last >= 61 ? '#ef4444' : last >= 36 ? '#f59e0b' : last >= 16 ? '#9ca3af' : '#10b981';
+  const cx = ((vals.length - 1) * step).toFixed(1);
+  const cy = (h - (last / 100) * h).toFixed(1);
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" class="inline-block align-middle" aria-label="severity trend"><polyline points="${pts}" fill="none" stroke="${stroke}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="${cx}" cy="${cy}" r="2" fill="${stroke}"/></svg>`;
+}
+
+// S12.1 - 3-sigma badge. Quiet on insufficient history or sub-threshold
+// spikes ; loud when current severity actually broke the baseline.
+function anomalyTone(anomaly: any): { show: boolean; label: string; cls: string } {
+  if (!anomaly || !anomaly.is_anomaly) return { show: false, label: '', cls: '' };
+  const delta = Math.round(Number(anomaly.spike_over_baseline) || 0);
+  return { show: true, label: `+${delta} vs baseline`, cls: 'bg-red-100 text-red-700 font-semibold' };
+}
+
 function actionChip(a?: { label?: string; tone?: string }) {
   if (!a || !a.label) return { label: '-', cls: 'text-charcoal-light' };
   const tone = a.tone || 'low';
@@ -95,8 +118,8 @@ function actionChip(a?: { label?: string; tone?: string }) {
       Snapshot of negative LLM mentions for this scan. We count
       <code class="text-[10px] bg-gray-100 px-1 rounded">brand_mentions[].sentiment = 'negative'</code> per brand,
       categorize each by content theme (safety, efficacy, ingredients, pricing, service, quality), and surface
-      the matching playbook. Single-scan only in v1 - cross-scan trend
-      lands in S12.1 once enough rescans accumulate.
+      the matching playbook. Severity sparklines + a <span class="font-semibold">+X vs baseline</span> badge
+      light up once a lineage of 4+ completed scans has accumulated (3&sigma; spike detection).
     </p>
 
     {/* Hero KPI banner */}
@@ -114,6 +137,14 @@ function actionChip(a?: { label?: string; tone?: string }) {
               </span>
               <span class="text-3xl font-bold text-charcoal-dark">{target.severity ?? 0}</span>
               <span class="text-sm text-charcoal-light">/ 100</span>
+              {(() => {
+                const spark = crisisSpark(target.trend || []);
+                return spark ? <Fragment set:html={spark} /> : null;
+              })()}
+              {(() => {
+                const a = anomalyTone(target.anomaly);
+                return a.show ? <span class={`text-[10px] px-1.5 py-0.5 rounded ${a.cls}`}>&#9888; {a.label}</span> : null;
+              })()}
               <span class="text-xs text-charcoal-light ml-auto">{target.brand_name}</span>
             </div>
             <p class="text-[11px] text-charcoal-light mt-3 leading-snug">
@@ -356,6 +387,16 @@ function actionChip(a?: { label?: string; tone?: string }) {
                             {p.severity_label || 'none'} {p.severity != null ? `· ${p.severity}` : ''}
                           </span>
                         </Tip>
+                        {(() => {
+                          const spark = crisisSpark(p.trend || [], 44, 14);
+                          const a = anomalyTone(p.anomaly);
+                          return (
+                            <div class="flex items-center gap-1 mt-1">
+                              {spark && <Fragment set:html={spark} />}
+                              {a.show && <span class={`text-[9px] px-1 py-px rounded ${a.cls}`}>&#9888; {a.label}</span>}
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td class="px-3 py-2 align-top">
                         {cat ? (
@@ -475,6 +516,16 @@ function actionChip(a?: { label?: string; tone?: string }) {
                             {c.severity_label || 'none'} {c.severity != null ? `· ${c.severity}` : ''}
                           </span>
                         </Tip>
+                        {(() => {
+                          const spark = crisisSpark(c.trend || [], 44, 14);
+                          const a = anomalyTone(c.anomaly);
+                          return (
+                            <div class="flex items-center gap-1 mt-1">
+                              {spark && <Fragment set:html={spark} />}
+                              {a.show && <span class={`text-[9px] px-1 py-px rounded ${a.cls}`}>&#9888; {a.label}</span>}
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td class="px-3 py-2 align-top">
                         {cat ? (

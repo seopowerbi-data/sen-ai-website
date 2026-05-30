@@ -1324,18 +1324,15 @@ async def validate_scan_brands(scan_id: str, user=Depends(get_current_user), db:
 
 # --- Rescan + lineage ---
 
-@router.post("/{scan_id}/rescan")
-@limiter.limit("10/minute")
-async def rescan(request: Request, scan_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
-    """Create a child scan that inherits topics, personas, questions and brand classifications
-    from the parent. Skips Gate 1 and Gate 2 - goes straight to fetching_keywords (fresh HaloScan
-    + fresh LLM) while reusing the validated setup.
+def _perform_rescan(db: Session, parent: "Scan", created_by_user_id) -> "Scan":
+    """Shared rescan core - called by both the user-facing /rescan endpoint
+    and the worker-triggered /auto-rescan endpoint. Raises HTTPException on
+    user-recoverable issues (missing personas, insufficient credits) so both
+    surfaces propagate the same shape to their respective callers.
 
-    Phase 1: copies topics, personas, questions, scan_brand_classifications.
-             Does NOT copy opportunities or llm_results (those are fresh per run).
+    Mutates the DB but does NOT commit ; callers commit when they're done
+    setting up surrounding context (e.g. updating parent.next_run_at).
     """
-    parent = _check_scan_access(scan_id, user, db)
-
     # Count the active questions that will be copied to the child - this is
     # what `run_llm_tests` will execute, and what we must charge for.
     active_personas = db.query(ScanPersona).filter(
@@ -1397,7 +1394,7 @@ async def rescan(request: Request, scan_id: str, user=Depends(get_current_user),
         schedule=parent.schedule or "manual",
         run_index=max_run_index + 1,
         config=dict(parent.config or {}),
-        created_by=user.id,
+        created_by=created_by_user_id,
     )
     db.add(child)
     db.flush()  # need child.id for children rows
@@ -1485,6 +1482,60 @@ async def rescan(request: Request, scan_id: str, user=Depends(get_current_user),
     _create_job(db, str(child.id), "run_llm_tests", {
         "providers": (child.config or {}).get("providers", ["openai"]),
     })
+
+    return child
+
+
+@router.post("/{scan_id}/rescan")
+@limiter.limit("10/minute")
+async def rescan(request: Request, scan_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """User-triggered rescan. Inherits the validated setup (topics, personas,
+    questions, brand classifications) from the parent ; skips Gate 1 + Gate 2
+    and goes straight to run_llm_tests on fresh AI responses.
+    """
+    parent = _check_scan_access(scan_id, user, db)
+    child = _perform_rescan(db, parent, user.id)
+    db.commit()
+    db.refresh(child)
+    return _serialize_scan(child)
+
+
+@router.post("/{scan_id}/auto-rescan")
+async def auto_rescan(
+    scan_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """S15.4 part B - worker-triggered rescan. Authenticated by the shared
+    INTERNAL_SERVICE_TOKEN header rather than a user JWT, since the cron
+    sweep has no user session. Always charges the same credits as a
+    user-triggered rescan ; if the client is out of credits the worker
+    catches the 402, defers next_run_at and logs, but does NOT silently
+    overspend.
+    """
+    expected = (settings.internal_service_token or "").strip()
+    presented = (request.headers.get("X-Internal-Token") or "").strip()
+    if not expected or presented != expected:
+        raise HTTPException(401, "Invalid or missing X-Internal-Token")
+
+    parent = db.query(Scan).filter(Scan.id == scan_id).first()
+    if not parent:
+        raise HTTPException(404, "Scan not found")
+    if parent.status != "completed":
+        raise HTTPException(
+            400,
+            f"Auto-rescan only fires on completed scans (current status: {parent.status})",
+        )
+
+    child = _perform_rescan(db, parent, parent.created_by)
+
+    # Re-arm the parent's next firing so the cron sweep doesn't immediately
+    # re-trigger. We anchor on NOW rather than parent.completed_at because
+    # multiple consecutive runs of the same schedule shouldn't drift back
+    # towards the original completion timestamp.
+    interval = _RESCAN_INTERVALS.get(parent.schedule or "manual")
+    if interval is not None:
+        parent.next_run_at = datetime.utcnow() + interval
 
     db.commit()
     db.refresh(child)
@@ -4537,10 +4588,47 @@ def _crisis_action(severity_label: str | None, classification: str) -> dict:
     return {"label": text, "tone": tone}
 
 
+def _compute_crisis_anomaly(history_severities: list[int], current_severity: int) -> dict:
+    """3-sigma anomaly check used by S12.1 cross-scan trend.
+
+    `history_severities` is the ordered list of severity scores for this
+    brand on PRIOR completed scans in the same lineage (excludes current).
+    Needs >= 3 prior runs to compute a meaningful std + threshold.
+    Also requires current severity > 35 so we don't flag noise on
+    brands whose baseline is near-zero.
+    """
+    import statistics
+    prior = [s for s in history_severities if s is not None]
+    if len(prior) < 3:
+        return {"is_anomaly": False, "reason": "insufficient_history", "history_size": len(prior)}
+    try:
+        mean = statistics.fmean(prior)
+        std = statistics.stdev(prior)
+    except statistics.StatisticsError:
+        return {"is_anomaly": False, "reason": "no_variance", "history_size": len(prior)}
+    threshold = mean + 3 * std
+    spike = current_severity - mean
+    return {
+        "is_anomaly": current_severity > threshold and current_severity > 35,
+        "baseline_mean": round(mean, 1),
+        "baseline_std": round(std, 1),
+        "current": current_severity,
+        "threshold": round(threshold, 1),
+        "spike_over_baseline": round(spike, 1),
+        "history_size": len(prior),
+    }
+
+
 @router.get("/{scan_id}/crisis")
 async def get_crisis(scan_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
     """Per-scan crisis snapshot. One row per (scan, brand) with severity
-    label + dominant category + top contexts + matching playbook."""
+    label + dominant category + top contexts + matching playbook.
+
+    S12.1 cross-scan trend : when the scan belongs to a lineage of >= 2
+    completed scans, each row also carries `trend` (severity over time)
+    and `anomaly` (3-sigma flag vs prior baseline). Sparkline + badge
+    in the UI consume these.
+    """
     _check_scan_access(scan_id, user, db)
 
     # Sort : severity DESC, then negative_count DESC, then total_mentions
@@ -4565,6 +4653,64 @@ async def get_crisis(scan_id: str, user=Depends(get_current_user), db: Session =
     scan_row = db.query(Scan).filter(Scan.id == scan_id).first()
     focus_brand_id = str(scan_row.focus_brand_id) if (scan_row and scan_row.focus_brand_id) else None
 
+    # S12.1 - per-brand history across the scan lineage. We pull every
+    # scan_crisis_signal row whose scan lives in the same lineage and
+    # group by brand_id, so each item below can render a sparkline +
+    # anomaly badge without a follow-up roundtrip.
+    by_brand_history: dict[str, list[dict]] = {}
+    if scan_row is not None:
+        root_id = scan_row.parent_scan_id or scan_row.id
+        lineage = (
+            db.query(Scan)
+            .filter(
+                ((Scan.id == root_id) | (Scan.parent_scan_id == root_id)),
+                Scan.status == "completed",
+            )
+            .order_by(Scan.run_index.asc(), Scan.completed_at.asc())
+            .all()
+        )
+        scan_meta = {
+            str(s.id): {
+                "run_index": s.run_index or 0,
+                "completed_at": s.completed_at.isoformat() + "Z" if s.completed_at else None,
+            }
+            for s in lineage
+        }
+        lineage_ids = list(scan_meta.keys())
+        if lineage_ids:
+            from sqlalchemy import text as _text
+            history_rows = db.execute(_text(
+                """
+                SELECT scan_id::text AS sid,
+                       brand_id::text AS bid,
+                       severity, severity_label
+                  FROM scan_crisis_signals
+                 WHERE scan_id::text = ANY(:sids)
+                """
+            ), {"sids": lineage_ids}).fetchall()
+            for h in history_rows:
+                meta = scan_meta.get(h.sid, {})
+                by_brand_history.setdefault(h.bid, []).append({
+                    "run_index": meta.get("run_index", 0),
+                    "completed_at": meta.get("completed_at"),
+                    "scan_id": h.sid,
+                    "severity": h.severity or 0,
+                    "severity_label": h.severity_label,
+                })
+            for bid in by_brand_history:
+                by_brand_history[bid].sort(key=lambda x: x["run_index"])
+
+    def _attach_trend(item: dict) -> dict:
+        """Add `trend` (full history) + `anomaly` (3-sigma flag vs prior runs)
+        to a brand row. Mutates and returns the same dict."""
+        history = by_brand_history.get(item["brand_id"], [])
+        item["trend"] = history
+        # Anomaly is computed against prior runs (exclude the current scan)
+        # so the current value isn't included in the baseline mean/std.
+        prior = [h["severity"] for h in history if h["scan_id"] != scan_id]
+        item["anomaly"] = _compute_crisis_anomaly(prior, item["severity"] or 0)
+        return item
+
     target_row = None
     target_candidate_by_mentions = None
     target_product_lines: list[dict] = []  # non-focus my_brand rows with crisis signal
@@ -4574,7 +4720,7 @@ async def get_crisis(scan_id: str, user=Depends(get_current_user), db: Session =
     for r in rows:
         if r.created_at and (last_seen is None or r.created_at > last_seen):
             last_seen = r.created_at
-        item = {
+        item = _attach_trend({
             "brand_id": str(r.brand_id),
             "brand_name": r.brand_name,
             "classification": r.brand_classification,
@@ -4592,7 +4738,7 @@ async def get_crisis(scan_id: str, user=Depends(get_current_user), db: Session =
             "shared_with": r.shared_with or [],
             "recommended_action": _crisis_action(r.severity_label, r.brand_classification),
             "playbook": _CRISIS_PLAYBOOKS.get(r.dominant_category or "other") if r.negative_count > 0 else None,
-        }
+        })
         if r.severity_label:
             by_severity[r.severity_label] = by_severity.get(r.severity_label, 0) + 1
         if r.brand_classification == "my_brand":

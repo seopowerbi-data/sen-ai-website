@@ -81,6 +81,15 @@ _LAST_POST_PUBLISH_SCAN_TS = 0.0
 MEDIA_CATALOG_SWEEP_INTERVAL_SECONDS = 86400  # 24h
 _LAST_MEDIA_CATALOG_SWEEP_TS = 0.0
 
+# S15.4 part B - auto-rescan cron sweep. Polls every 5 min for scans with
+# weekly/monthly schedule whose next_run_at has elapsed and triggers the
+# auto-rescan endpoint. Failures (insufficient credits, transient errors)
+# defer next_run_at by AUTO_RESCAN_RETRY_DEFER_SECONDS so we don't hammer.
+AUTO_RESCAN_SWEEP_INTERVAL_SECONDS = 300        # 5 min
+AUTO_RESCAN_RETRY_DEFER_SECONDS = 86400         # 24h on failure
+AUTO_RESCAN_BATCH_LIMIT = 10                    # cap fired-per-tick to bound the call burst
+_LAST_AUTO_RESCAN_SWEEP_TS = 0.0
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
@@ -722,6 +731,85 @@ def enqueue_media_catalog_discovery() -> None:
         db.close()
 
 
+def sweep_due_rescans() -> None:
+    """Auto-rescan cron sweep (S15.4 part B).
+
+    Picks up to AUTO_RESCAN_BATCH_LIMIT scans whose schedule is weekly/monthly
+    AND next_run_at <= NOW(), and calls the api `POST /scans/{id}/auto-rescan`
+    endpoint with the shared service token. The endpoint re-arms next_run_at
+    on success ; on credit / transient failure we defer here so the cron
+    doesn't loop on the same scan.
+    """
+    import httpx
+
+    global _LAST_AUTO_RESCAN_SWEEP_TS
+    now = time.time()
+    if now - _LAST_AUTO_RESCAN_SWEEP_TS < AUTO_RESCAN_SWEEP_INTERVAL_SECONDS:
+        return
+    _LAST_AUTO_RESCAN_SWEEP_TS = now
+
+    token = (settings.internal_service_token or "").strip()
+    if not token:
+        logger.debug("auto_rescan_sweep: INTERNAL_SERVICE_TOKEN unset, skipping")
+        return
+
+    db = SessionLocal()
+    try:
+        from models import Scan
+        due = (
+            db.query(Scan)
+            .filter(
+                Scan.status == "completed",
+                Scan.schedule.in_(("weekly", "monthly")),
+                Scan.next_run_at != None,  # noqa: E711 - SQLAlchemy column comparison
+                Scan.next_run_at <= datetime.utcnow(),
+            )
+            .order_by(Scan.next_run_at.asc())
+            .limit(AUTO_RESCAN_BATCH_LIMIT)
+            .all()
+        )
+        if not due:
+            return
+
+        logger.info(f"auto_rescan_sweep: {len(due)} scan(s) due")
+        base_url = settings.api_internal_base_url.rstrip("/")
+        for parent in due:
+            try:
+                resp = httpx.post(
+                    f"{base_url}/api/scans/{parent.id}/auto-rescan",
+                    headers={"X-Internal-Token": token},
+                    timeout=30.0,
+                )
+                if resp.status_code == 200:
+                    logger.info(f"auto_rescan_sweep: rescanned {parent.id} ({parent.domain})")
+                elif resp.status_code == 402:
+                    logger.warning(
+                        f"auto_rescan_sweep: {parent.id} out of credits, "
+                        f"deferring {AUTO_RESCAN_RETRY_DEFER_SECONDS}s"
+                    )
+                    parent.next_run_at = datetime.utcnow() + timedelta(seconds=AUTO_RESCAN_RETRY_DEFER_SECONDS)
+                    db.commit()
+                else:
+                    logger.error(
+                        f"auto_rescan_sweep: {parent.id} returned {resp.status_code}: "
+                        f"{resp.text[:200]} - deferring"
+                    )
+                    parent.next_run_at = datetime.utcnow() + timedelta(seconds=AUTO_RESCAN_RETRY_DEFER_SECONDS)
+                    db.commit()
+            except Exception:
+                logger.exception(f"auto_rescan_sweep: HTTP call for {parent.id} failed - deferring")
+                try:
+                    parent.next_run_at = datetime.utcnow() + timedelta(seconds=AUTO_RESCAN_RETRY_DEFER_SECONDS)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+    except Exception:
+        db.rollback()
+        logger.exception("sweep_due_rescans failed")
+    finally:
+        db.close()
+
+
 def poll_and_execute():
     """Pick one pending job and execute it.
 
@@ -955,6 +1043,7 @@ def main():
             enqueue_post_publish_measurements()  # Pilier 7 T+14 sweep, every 1h
             enqueue_media_publish_outcomes()     # Phase MR.4 #3 media outcome sweep
             enqueue_media_catalog_discovery()    # Phase MR.1 catalog refresh, every 24h
+            sweep_due_rescans()                  # S15.4 part B auto-rescan, every 5 min
             had_job = poll_and_execute()
             if not had_job:
                 time.sleep(settings.poll_interval)
