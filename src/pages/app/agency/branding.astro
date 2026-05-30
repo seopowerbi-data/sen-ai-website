@@ -1,0 +1,140 @@
+---
+/**
+ * White-label lite branding editor - S15.4.
+ *
+ * Agency owners / admins can set a logo URL, display name, and accent
+ * color that override the default sen-ai.fr branding in the sidebar
+ * (and future surfaces) for everyone inside this org. No custom domain
+ * support yet (still served from sen-ai.fr).
+ */
+export const prerender = false;
+import DashboardLayout from '../../../layouts/DashboardLayout.astro';
+
+const token = Astro.cookies.get('token')?.value;
+if (!token) return Astro.redirect('/login');
+
+const activeOrgCookie = Astro.cookies.get('active_organization_id')?.value;
+const upstreamCookie = [`token=${token}`, activeOrgCookie ? `active_organization_id=${activeOrgCookie}` : null].filter(Boolean).join('; ');
+
+type OrgItem = { id: string; name: string; is_personal: boolean; role: string | null; is_active: boolean; branding?: any };
+let activeOrg: OrgItem | null = null;
+try {
+  const r = await fetch('http://api:8000/api/organizations/', { headers: { Cookie: upstreamCookie }, signal: AbortSignal.timeout(3000) });
+  if (r.ok) {
+    const list: OrgItem[] = await r.json();
+    activeOrg = list.find(o => o.is_active) || list[0] || null;
+  }
+} catch {}
+
+const isManager = !!activeOrg && !activeOrg.is_personal && (activeOrg.role === 'owner' || activeOrg.role === 'admin');
+const branding = activeOrg?.branding || {};
+---
+
+<DashboardLayout title="Branding" activeSection="dashboard">
+  <main class="px-6 py-8 max-w-2xl mx-auto">
+    <a href="/app/agency/overview" class="text-xs text-charcoal-light hover:text-coral">&larr; Workspace overview</a>
+    <h1 class="text-2xl font-bold text-charcoal-dark mt-2">Branding</h1>
+    <p class="text-sm text-charcoal-light mt-1 mb-6">
+      White-label lite. Custom logo + display name + accent color show up inside the app for
+      everyone in this org. No custom domain yet (the app stays on sen-ai.fr).
+    </p>
+
+    {!isManager && (
+      <div class="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6">
+        <p class="text-xs text-amber-700">
+          Only owners and admins of an agency org can edit branding. Switch via the header
+          dropdown or ask your org owner.
+        </p>
+      </div>
+    )}
+
+    {isManager && (
+      <div
+        x-data={`{
+          logo: '${(branding.logo_url || '').replace(/'/g, "\\'")}',
+          name: '${(branding.display_name || '').replace(/'/g, "\\'")}',
+          color: '${branding.accent_color || ''}',
+          saving: false,
+          saved: false,
+          err: '',
+          async save() {
+            this.saving = true; this.saved = false; this.err = '';
+            try {
+              const r = await fetch('/api/organizations/${activeOrg!.id}/branding', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ logo_url: this.logo, display_name: this.name, accent_color: this.color }),
+              });
+              if (!r.ok) {
+                const j = await r.json().catch(() => ({}));
+                this.err = j.detail || 'Save failed';
+              } else {
+                this.saved = true;
+                setTimeout(() => location.reload(), 600);
+              }
+            } catch (e) { this.err = (e && e.message) || 'Network error'; }
+            this.saving = false;
+          },
+        }`}
+        class="bg-white rounded-xl border border-gray-200 p-6 space-y-4"
+      >
+        <div>
+          <label class="block text-xs uppercase tracking-wide text-charcoal-light font-semibold mb-1">Logo URL</label>
+          <input
+            x-model="logo"
+            type="url"
+            placeholder="https://your-cdn.example.com/logo.png"
+            class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:border-coral"
+          />
+          <p class="text-[11px] text-charcoal-light mt-1">Square PNG / SVG works best. Hosted publicly (we just embed the URL).</p>
+          <template x-if="logo">
+            <div class="mt-2 flex items-center gap-2">
+              <img :src="logo" alt="logo preview" class="w-10 h-10 rounded object-contain bg-gray-50 border border-gray-200" onerror="this.style.display='none'" />
+              <span class="text-[10px] text-charcoal-light">Preview</span>
+            </div>
+          </template>
+        </div>
+
+        <div>
+          <label class="block text-xs uppercase tracking-wide text-charcoal-light font-semibold mb-1">Display name</label>
+          <input
+            x-model="name"
+            type="text"
+            maxlength="80"
+            placeholder={activeOrg!.name}
+            class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:border-coral"
+          />
+          <p class="text-[11px] text-charcoal-light mt-1">Shown in the sidebar instead of the org name. Leave empty to keep "{activeOrg!.name}".</p>
+        </div>
+
+        <div>
+          <label class="block text-xs uppercase tracking-wide text-charcoal-light font-semibold mb-1">Accent color</label>
+          <div class="flex items-center gap-2">
+            <input
+              x-model="color"
+              type="text"
+              maxlength="7"
+              placeholder="#FF5733"
+              class="w-32 px-3 py-2 text-sm font-mono border border-gray-300 rounded-lg focus:outline-none focus:border-coral"
+            />
+            <span x-show="color" class="w-8 h-8 rounded border border-gray-300" :style="'background-color: ' + color"></span>
+          </div>
+          <p class="text-[11px] text-charcoal-light mt-1">CSS hex (e.g. #FF5733). v1 surfaces this on the compliance + methodology pages only.</p>
+        </div>
+
+        <div class="flex items-center gap-2 pt-2">
+          <button
+            @click="save()"
+            :disabled="saving"
+            class="px-4 py-2 bg-coral text-white text-sm font-medium rounded-lg hover:bg-coral-dark disabled:bg-gray-300 transition-all"
+          >
+            <span x-show="!saving && !saved">Save</span>
+            <span x-show="saving">Saving&hellip;</span>
+            <span x-show="saved" class="text-emerald-100">Saved &#10003;</span>
+          </button>
+          <p x-show="err" x-text="err" class="text-xs text-red-600"></p>
+        </div>
+      </div>
+    )}
+  </main>
+</DashboardLayout>

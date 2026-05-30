@@ -49,6 +49,10 @@ class OrgListItem(BaseModel):
     member_count: int
     client_count: int
     is_active: bool
+    # Sprint S15.4 white-label lite. `branding` JSONB shape :
+    #   {"logo_url": "https://...", "display_name": "Agency XYZ", "accent_color": "#FF5733"}
+    # All keys optional. Empty dict = no branding override.
+    branding: dict = {}
 
 
 class SetActiveOrgRequest(BaseModel):
@@ -125,6 +129,7 @@ async def list_organizations(
             member_count=members_by_org.get(str(o.id), 0),
             client_count=clients_by_org.get(str(o.id), 0),
             is_active=(effective_active_id is not None and str(o.id) == effective_active_id),
+            branding=o.branding or {},
         )
         for o in orgs
     ]
@@ -1043,6 +1048,59 @@ async def workspaces_overview(
             "with_crisis": with_crisis,
         },
     }
+
+
+class BrandingUpdateRequest(BaseModel):
+    # All optional. Pass empty string to clear a field.
+    logo_url: str | None = None
+    display_name: str | None = None
+    accent_color: str | None = None  # CSS hex like "#FF5733"
+
+
+@router.patch("/{org_id}/branding")
+async def update_org_branding(
+    org_id: str,
+    req: BrandingUpdateRequest,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """S15.4 white-label lite - per-org branding override. Owner / admin only.
+    Stored as a flat dict on organizations.branding (JSONB). Empty string on
+    any field clears it. Accent color must be a CSS hex like '#FF5733'."""
+    org, _caller = _require_org_manager(org_id, user, db)
+
+    current = dict(org.branding or {})
+    if req.logo_url is not None:
+        v = req.logo_url.strip()
+        if v and not (v.startswith("https://") or v.startswith("http://")):
+            raise HTTPException(400, "logo_url must be an http(s) URL")
+        if v:
+            current["logo_url"] = v[:500]
+        else:
+            current.pop("logo_url", None)
+    if req.display_name is not None:
+        v = req.display_name.strip()
+        if v:
+            from services.sanitize import strip_tags
+            current["display_name"] = strip_tags(v)[:80]
+        else:
+            current.pop("display_name", None)
+    if req.accent_color is not None:
+        v = req.accent_color.strip()
+        if v:
+            import re as _re
+            if not _re.match(r"^#[0-9a-fA-F]{6}$", v):
+                raise HTTPException(400, "accent_color must be a CSS hex like #FF5733")
+            current["accent_color"] = v.lower()
+        else:
+            current.pop("accent_color", None)
+
+    org.branding = current
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(org, "branding")
+    db.commit()
+    db.refresh(org)
+    return {"id": str(org.id), "branding": org.branding}
 
 
 @router.get("/{org_id}/compliance/pdf")
