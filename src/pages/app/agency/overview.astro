@@ -125,13 +125,20 @@ function relTime(iso: string | null): string {
 
 const isAgencyOrg = !!activeOrg && !activeOrg.is_personal;
 
-// Sort : crisis severity DESC, then citation_rate ASC (worst first), then name
+// Sort : crisis severity DESC, then weakest brand-mention rate first, then
+// name. The sort key has to match the metric we render on each card (the
+// 'rate' below reads brand_mention_rate first, falls back to citation_rate),
+// otherwise the ranking and the visible number disagree.
+function _displayRate(ws: Workspace): number {
+  const ls = ws.latest_scan;
+  return ls?.brand_mention_rate ?? ls?.citation_rate ?? 999;
+}
 workspaces.sort((a, b) => {
   const sa = a.latest_scan?.crisis_severity ?? -1;
   const sb = b.latest_scan?.crisis_severity ?? -1;
   if (sa !== sb) return sb - sa;
-  const ra = a.latest_scan?.citation_rate ?? 999;
-  const rb = b.latest_scan?.citation_rate ?? 999;
+  const ra = _displayRate(a);
+  const rb = _displayRate(b);
   if (ra !== rb) return ra - rb;
   return a.name.localeCompare(b.name);
 });
@@ -193,17 +200,28 @@ workspaces.sort((a, b) => {
           </div>
         </div>
 
-        {/* Workspace cards */}
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Workspace cards. Click activates the workspace cookie-side before
+            navigating, so the destination page (scan results or new-scan
+            wizard) inherits the right active client. */}
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {workspaces.map((w) => {
             const ls = w.latest_scan;
             const sc = statusChip(ls?.status || null);
             const rate = ls?.brand_mention_rate ?? ls?.citation_rate ?? null;
             const badge = citationRateBadge(rate);
             const crisis = severityChip(ls?.crisis_severity_label || null);
-            const scanPath = ls ? (ls.status === 'completed' ? `/app/scans/${ls.scan_id}/results` : `/app/scans/${ls.scan_id}`) : null;
+            // 'No scan' cards send the user to the new-scan wizard ; existing
+            // cards land on results or on the in-progress pipeline view.
+            const scanPath = ls ? (ls.status === 'completed' ? `/app/scans/${ls.scan_id}/results` : `/app/scans/${ls.scan_id}`) : '/app/scans/new';
+            const isCompleted = ls?.status === 'completed';
             return (
-              <a href={scanPath || '#'} class={`block bg-white rounded-xl border p-5 hover:shadow-md hover:border-coral/40 transition-all ${crisis ? 'border-red-200' : 'border-gray-200'}`}>
+              <a
+                href={scanPath}
+                data-client-id={w.client_id}
+                onclick={`event.preventDefault(); const h = this.href, c = this.dataset.clientId; fetch('/api/clients/active', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: c }) }).finally(() => { window.location.href = h; });`}
+                aria-label={`Open workspace ${w.name}`}
+                class={`block bg-white rounded-xl border p-5 hover:shadow-md hover:border-coral/40 transition-all ${crisis ? 'border-red-200' : 'border-gray-200'}`}
+              >
                 <div class="flex items-start justify-between gap-3 mb-3">
                   <div class="min-w-0">
                     <h2 class="text-base font-semibold text-charcoal-dark truncate">{w.name}</h2>
@@ -228,7 +246,7 @@ workspaces.sort((a, b) => {
                     <dd class="text-charcoal-dark text-right tabular-nums">{rate !== null ? `${rate}%` : '—'}</dd>
 
                     <dt class="text-charcoal-light">Critical gaps</dt>
-                    <dd class={`text-right tabular-nums ${(ls.critical_count || 0) > 0 ? 'text-red-600 font-medium' : 'text-charcoal-dark'}`}>{ls.critical_count}</dd>
+                    <dd class={`text-right tabular-nums ${isCompleted && (ls.critical_count || 0) > 0 ? 'text-red-600 font-medium' : 'text-charcoal-dark'}`}>{isCompleted ? ls.critical_count : '—'}</dd>
 
                     <dt class="text-charcoal-light">Last scan</dt>
                     <dd class="text-charcoal-dark text-right">{relTime(ls.completed_at)}</dd>
@@ -241,7 +259,7 @@ workspaces.sort((a, b) => {
                     )}
                   </dl>
                 ) : (
-                  <p class="text-[11px] text-charcoal-light italic">No scan yet – click to set up.</p>
+                  <p class="text-[11px] text-charcoal-light italic">No scan yet &ndash; click to set up.</p>
                 )}
               </a>
             );
